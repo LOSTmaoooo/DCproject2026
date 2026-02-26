@@ -1,0 +1,33 @@
+# The results from the paper can be reproduced using the following parameters
+binarization:
+  sample_rate: 4
+  min_interval_len: 4
+  erode: True
+models:
+  grad_from_block: 11
+  pretrained_backbone: dino_vitb8
+  mask_layers: 9
+  n_views: 2
+  n_head: 4
+training:
+  batch_size: 32
+  num_workers: 0
+  lr: 0.003
+  gamma: 0.1
+  momentum: 0.9
+  weight_decay: 0.00005
+  epochs: 100
+loss:
+  sup_weight: 0.3
+  memax_weight: 4
+  anomaly_thred: 0.5
+  teacher_temp: 0.04
+  warmup_teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 40
+  repeat_times: 4
+experiment:
+  seed: 3407
+  print_freq: 3
+  table_root: outputs/output_table
+  exp_name: AnomalyNCD
+  exp_root: outputs
