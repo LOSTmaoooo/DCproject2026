@@ -1,208 +1,229 @@
-# -*- coding: utf-8 -*-
 import os
 import sys
 import shutil
-import glob
-import numpy as np
-import cv2
-import torch
-import warnings
-import json
-import logging
-from datetime import datetime
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("PipelineEngine")
+# =================================================================================================
+# 模块：核心执行引擎 (Core Execution Engine)
+# 功能：协调系统的各个组件（MuSc, AnomalyNCD 等），串联成完整的处理流水线。
+# =================================================================================================
 
-# Add project root to path
+# -------------------------------------------------------------------------------------------------
+# 路径配置
+# -------------------------------------------------------------------------------------------------
+# 获取项目根目录，以便动态定位其他资源和库
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
+LIBS_PATH = os.path.join(PROJECT_ROOT, 'libs')
+MUSC_PATH = os.path.join(LIBS_PATH, 'MuSc')
+NCD_PATH = os.path.join(LIBS_PATH, 'AnomalyNCD')
 
-try:
-    from core.musc_wrapper import MuScWrapper
-    from core.AnomalyNCD_wrapper import AnomalyNCDWrapper
-except ImportError as e:
-    logger.error(f"Import Error: {e}")
-    logger.error("Please ensure your PYTHONPATH includes the project root.")
+# 将 core 目录加入系统路径，确保可以从其他地方(如 Streamlit app) 导入 core 下的模块
+sys.path.append(os.path.join(PROJECT_ROOT, 'core'))
 
-class PipelineEngine:
-    def __init__(self, output_base_dir=None):
-        self.project_root = PROJECT_ROOT
-        self.libs_path = os.path.join(self.project_root, 'libs')
+class BatchPipeline:
+    """
+    批量处理流水线 (Batch Processing Pipeline)
+    
+    该类负责执行 'Mode 3: Batch Analysis' 的主要业务逻辑。
+    它按顺序调用以下步骤：
+    1. 使用 MuSc 生成异常图 (Anomaly Maps)。
+    2. 使用 AnomalyNCD 进行新类发现 (Novel Class Discovery)，基于生成的异常图和原始图像进行聚类分析。
+    """
+    
+    def __init__(self):
+        """
+        初始化流水线。
+        Wrapper 类被延迟初始化（设为 None），以节省启动资源，仅在需要时加载模型。
+        """
+        self.musc_wrapper = None
+        self.ncd_wrapper = None
         
-        # Paths to default configs
-        self.musc_config = os.path.join(self.libs_path, 'MuSc', 'configs', 'musc.yaml')
-        self.ncd_config = os.path.join(self.libs_path, 'AnomalyNCD', 'configs', 'AnomalyNCD.yaml')
+        #设置默认的输出目录：data_store/results
+        self.output_base = os.path.join(PROJECT_ROOT, 'data_store', 'results')
+        os.makedirs(self.output_base, exist_ok=True)
         
-        # Output setup
-        if output_base_dir is None:
-            self.output_base = os.path.join(self.project_root, 'data_store', 'results')
-        else:
-            self.output_base = output_base_dir
+    def run(self, input_dir, output_dir=None):
+        """
+        执行完整流水线的主入口方法。
+        
+        参数:
+            input_dir (str): 包含待分析图像（可能有异常）的输入目录路径。
+            output_dir (str, optional): 结果保存路径。如果为 None，则自动生成带时间戳的文件夹。
             
-    def _convert_npy_to_png(self, npy_path, out_dir):
+        返回:
+            bool: 如果流水线成功完成返回 True，否则返回 False。
         """
-        Convert single npy map to png.
-        """
+        import time
+        # 生成时间戳，用于创建唯一的运行输出文件夹
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        if output_dir is None:
+            output_dir = os.path.join(self.output_base, f"run_{timestamp}")
+            
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"[BatchPipeline] Pipeline started on {input_dir}")
+        print(f"[BatchPipeline] Results will be saved to {output_dir}")
+        
+        # -------------------------------------------------------------------------
+        # 步骤 1: 运行 MuSc 生成异常图
+        # -------------------------------------------------------------------------
+        print("\n--- Step 1: Running MuSc (Anomaly Map Generation) ---")
         try:
-            map_data = np.load(npy_path)
-            
-            # Normalize to 0-1 range for visualization/NCD processing
-            if map_data.max() - map_data.min() > 1e-9:
-                norm_map = (map_data - map_data.min()) / (map_data.max() - map_data.min())
-            else:
-                norm_map = map_data
-            
-            # Convert to 8-bit [0, 255]
-            img_map = (norm_map * 255).astype(np.uint8)
-            
-            # Clean filename
-            base_name = os.path.splitext(os.path.basename(npy_path))[0]
-            clean_name = base_name.replace('_map', '')
-             
-            out_path = os.path.join(out_dir, clean_name + '.png')
-            cv2.imwrite(out_path, img_map)
-            return True
+            # 调用 run_musc 方法，返回生成的异常图所在目录
+            # Output: output_dir/anomaly_maps
+            maps_dir = self.run_musc(input_dir, output_dir)
+            if not maps_dir:
+                print("[BatchPipeline] MuSc failed or produced no output.")
+                return False
         except Exception as e:
-            logger.error(f"Error converting {npy_path}: {e}")
+            # 捕获并打印详细错误堆栈，防止整个程序崩溃
+            print(f"[BatchPipeline] Error in MuSc step: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
-    def bridge_maps(self, npy_dir, png_dir):
-        """
-        Batch conversion from MuSc .npy output to AnomalyNCD .png input.
-        """
-        os.makedirs(png_dir, exist_ok=True)
-        npy_files = glob.glob(os.path.join(npy_dir, "*.npy"))
-        logger.info(f"Bridging {len(npy_files)} maps...")
-        
-        count = 0
-        for f in npy_files:
-            if self._convert_npy_to_png(f, png_dir):
-                count += 1
-        logger.info(f"Successfully bridged {count} maps.")
-        return png_dir
-
-    def check_aux_data(self):
-        """
-        Ensure auxiliary data (AeBAD_crop) exists for AnomalyNCD to function.
-        """
-        aux_data_path = os.path.join(self.libs_path, 'AnomalyNCD', 'data', 'AeBAD_crop', 'images')
-        # Check parent folder existence at least
-        if not os.path.exists(aux_data_path):
-             os.makedirs(aux_data_path, exist_ok=True)
-             
-        if not os.listdir(aux_data_path):
-            logger.warning(f"Auxiliary dataset not found at {aux_data_path}")
-            logger.warning("Creating dummy auxiliary data to prevent NCD crash...")
-            
-            dummy_class_dir = os.path.join(aux_data_path, 'dummy_class')
-            os.makedirs(dummy_class_dir, exist_ok=True)
-            
-            # Create a few dummy black images
-            for i in range(5):
-                dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
-                cv2.imwrite(os.path.join(dummy_class_dir, f'{i:03d}.png'), dummy_img)
-            logger.info("Dummy auxiliary data created.")
-
-    def run_pipeline(self, input_dir, run_name=None):
-        """
-        Main execution flow.
-        """
-        # Timestamp for unique run folder
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_folder_name = f"Run_{timestamp}" if run_name is None else f"{run_name}_{timestamp}"
-        
-        session_dir = os.path.join(self.output_base, run_folder_name)
-        os.makedirs(session_dir, exist_ok=True)
-        
-        musc_out_dir = os.path.join(session_dir, 'musc_maps_npy')
-        bridge_out_dir = os.path.join(session_dir, 'musc_maps_png')
-        ncd_out_dir = os.path.join(session_dir, 'ncd_results')
-        
-        logger.info("="*50)
-        logger.info(f"STARTING PIPELINE SESSION: {run_folder_name}")
-        logger.info(f"Input: {input_dir}")
-        logger.info(f"Output: {session_dir}")
-        logger.info("="*50)
-        
-        # --- Stage 1: MuSc Generator ---
-        logger.info(">>> Stage 1: Running MuSc (Anomaly Map Generator)...")
+        # -------------------------------------------------------------------------
+        # 步骤 1.5: 运行 DataBridge (数据格式转换与预处理)
+        # -------------------------------------------------------------------------
+        print("\n--- Step 1.5: Running DataBridge (Format Conversion) ---")
         try:
-            musc_wrapper = MuScWrapper(self.musc_config) # Initialize MuSc
+            # 定义中间数据存储目录
+            interim_dir = os.path.join(output_dir, 'interim_ncd_data')
             
-            if not os.path.exists(input_dir) or not os.listdir(input_dir):
-                 logger.error(f"Input directory {input_dir} is empty or missing!")
-                 return False
-
-            generated_paths = musc_wrapper.generate_anomaly_maps(input_dir, musc_out_dir)
+            # 使用 DataBridge 进行转换
+            # 它负责将 MuSc 的 .npy 热力图转为 NCD 需要的 dataset 结构 (images/masks)
+            dataset_ready_path = self.run_bridge(input_dir, maps_dir, interim_dir)
             
-            # Force cleanup to free VRAM for next stage
-            del musc_wrapper
-            torch.cuda.empty_cache()
-            
-            if not generated_paths:
-                logger.error("MuSc failed to generate any maps.")
+            if not dataset_ready_path:
+                print("[BatchPipeline] DataBridge failed.")
                 return False
                 
-            logger.info(f"Stage 1 Complete. Maps saved to {musc_out_dir}")
-            
         except Exception as e:
-            logger.critical(f"Stage 1 Failed: {e}", exc_info=True)
+            print(f"[BatchPipeline] Error in DataBridge step: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-
-        # --- Stage 2: Data Bridge ---
-        logger.info(">>> Stage 2: Bridging Data Formats...")
-        try:
-             self.bridge_maps(musc_out_dir, bridge_out_dir)
-             logger.info("Stage 2 Complete.")
-        except Exception as e:
-             logger.critical(f"Stage 2 Failed: {e}", exc_info=True)
-             return False
-
-        # --- Stage 3: AnomalyNCD Discovery ---
-        logger.info(">>> Stage 3: Running AnomalyNCD (Novel Class Discovery)...")
-        try:
-            self.check_aux_data()
             
-            ncd_wrapper = AnomalyNCDWrapper(self.ncd_config)
+        # -------------------------------------------------------------------------
+        # 步骤 2: 运行 AnomalyNCD 进行新类发现
+        # -------------------------------------------------------------------------
+        print("\n--- Step 2: Running AnomalyNCD (Novel Class Discovery) ---")
+        try: 
+            # 定义基础/正常类别的参考数据集路径。
+            # AnomalyNCD 通常需要对比正常样本来发现新类别。
+            # 这里的路径目前是硬编码的示例，实际使用中可能需要配置或作为参数传入。
+            base_data_path = os.path.join(PROJECT_ROOT, 'data_store', 'raw_inputs', 'normal_ref') 
             
-            # Run NCD
-            # Note: inputs are input_dir (original images) and bridge_out_dir (png maps)
-            results = ncd_wrapper.run(input_dir, bridge_out_dir, ncd_out_dir)
+            # 如果参考目录不存在，创建一个空目录以防报错（在实际部署中应确保有数据）
+            if not os.path.exists(base_data_path):
+                 print(f"[BatchPipeline] Warning: Base data path {base_data_path} not found. Creating empty.")
+                 os.makedirs(base_data_path, exist_ok=True)
             
-            logger.info("Stage 3 Complete.")
-            
-            # Save results summary
-            summary_file = os.path.join(session_dir, 'pipeline_summary.json')
-            with open(summary_file, 'w') as f:
-                json.dump({
-                    "success": True, 
-                    "run_id": run_folder_name,
-                    "stages": ["MuSc", "Bridge", "NCD"],
-                    "results_path": ncd_out_dir,
-                    "metrics": str(results)
-                }, f, indent=4)
+            # 调用 run_ncd 方法执行聚类分析
+            # 注意：这里的输入 dataset_path 变成了 DataBridge 处理后的路径
+            # maps_dir 依然传入，以备 NCD 内部需要原始 heatmaps
+            success = self.run_ncd(dataset_ready_path, maps_dir, base_data_path, output_dir)
+            if not success:
+                print("[BatchPipeline] AnomalyNCD step failed.")
+                return False
                 
-            logger.info("="*50)
-            logger.info("PIPELINE COMPLETED SUCCESSFULLY")
-            logger.info(f"Final results are in: {ncd_out_dir}")
-            logger.info("="*50)
-            return True
-            
         except Exception as e:
-            logger.critical(f"Stage 3 Failed: {e}", exc_info=True)
+            print(f"[BatchPipeline] Error in AnomalyNCD step: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+        
+        print(f"\n[BatchPipeline] Pipeline finished successfully. Results in {output_dir}")
+        return True
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="DCProject2026 Core Engine")
-    parser.add_argument('--input', type=str, required=True, help="Path to input images folder")
-    parser.add_argument('--output', type=str, default=None, help="Base path for results")
-    parser.add_argument('--name', type=str, default=None, help="Optional name for this run")
-    
-    args = parser.parse_args()
-    
-    engine = PipelineEngine(output_base_dir=args.output)
-    engine.run_pipeline(args.input, run_name=args.name)
+    def run_musc(self, input_dir, output_root):
+        """
+        封装 MuSc 的调用逻辑。
+        
+        参数:
+            input_dir (str): 输入图像目录。
+            output_root (str): 本次运行的根输出目录。
+            
+        返回:
+            str: 生成的异常图（.npy 文件）所在的具体目录路径。
+        """
+        # 延迟导入 MuScWrapper，避免在文件顶部导入时的循环依赖风险
+        from core.musc_wrapper import MuScWrapper
+        
+        # 配置 MuSc 的配置文件路径
+        config_path = os.path.join(MUSC_PATH, 'configs', 'musc.yaml')
+        # 定义异常图的特定输出子目录
+        maps_output_dir = os.path.join(output_root, 'anomaly_maps')
+        
+        # 懒加载：如果是第一次运行，则初始化 MuScWrapper
+        if self.musc_wrapper is None:
+            # We need to ensure config exists or handle error
+            if not os.path.exists(config_path):
+                print(f"[Engine] Warning: Config {config_path} not found.")
+                
+            self.musc_wrapper = MuScWrapper(config_path)
+            
+        # 执行生成过程
+        # generate_anomaly_maps 返回生成的文件列表
+        saved_paths = self.musc_wrapper.generate_anomaly_maps(input_dir, maps_output_dir)
+        
+        # 如果成功生成了文件，返回目录路径，否则返回 None
+        if saved_paths and len(saved_paths) > 0:
+            return maps_output_dir
+        return None
+
+    def run_bridge(self, input_images, input_maps, output_dir):
+        """
+        封装 DataBridge 的调用逻辑。
+        将 MuSc 的输出转换为 AnomalyNCD 的输入格式。
+        """
+        from core.data_bridge import DataBridge
+        
+        bridge = DataBridge() # 使用默认阈值，如有需要可传入参数
+        
+        print(f"[Engine] Bridging data from {input_images} to {output_dir}")
+        # data_bridge.prepare_ncd_dataset 应该返回处理后的有效数据目录
+        # 假设它返回的是 output_dir 或者 output_dir 下的具体子目录
+        # 根据 data_bridge.py 的逻辑，它会创建 output_dir/unknown_batch/images 等
+        
+        bridge.prepare_ncd_dataset(input_images, input_maps, output_dir)
+        
+        # 由于 AnomalyNCD 可能需要只要 root 目录，或者具体的子目录
+        # 这里我们返回 output_dir，并在 wrapper 中处理具体路径，或者这里返回具体子目录
+        # 假设 prepare_ncd_dataset 创建了标准结构，我们返回 output_dir 即可
+        return output_dir
+
+    def run_ncd(self, dataset_path, anomaly_map_path, base_path, output_root):
+        """
+        封装 AnomalyNCD 的调用逻辑。
+        
+        参数:
+            dataset_path (str): 包含待发现类别的图像路径（即本次的输入）。
+            anomaly_map_path (str): 上一步 MuSc 生成的异常图路径。
+            base_path (str): 正常样本的参考路径。
+            output_root (str): 本次运行的根输出目录。
+            
+        返回:
+            bool: 执行成功返回 True。
+        """
+        from core.anomalyncd_wrapper import AnomalyNCDWrapper
+        
+        # 配置 AnomalyNCD 的配置文件路径
+        config_path = os.path.join(NCD_PATH, 'configs', 'AnomalyNCD.yaml')
+        # 定义 NCD 结果的保存路径
+        ncd_output_dir = os.path.join(output_root, 'ncd_results')
+        
+        # 懒加载初始化
+        if self.ncd_wrapper is None:
+             if not os.path.exists(config_path):
+                print(f"[Engine] Warning: Config {config_path} not found.")
+             self.ncd_wrapper = AnomalyNCDWrapper(config_path)
+        
+        # 调用 Wrapper 的 run 方法
+        # 将 output_root 传递给 wrapper，以便它能在其下创建结构化的子目录
+        result = self.ncd_wrapper.run(
+            dataset_path=dataset_path, 
+            anomaly_map_path=anomaly_map_path,
+            base_data_path=base_path,
+            output_dir=output_root # Use root so NCD structures inside it
+        )
+        
+        return result
