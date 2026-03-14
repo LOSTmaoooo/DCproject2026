@@ -44,12 +44,30 @@ if mode == "Mode 3: Batch Analysis (Focus)":
     st.info("Upload a folder of images or Select a local directory to process a batch of images for Novel Class Discovery.")
     
     # 输入相关 UI
-    # 目前使用文本框输入本地路径，未来可扩展为文件夹选择器
-    # 默认值是为了方便测试
-    input_dir = st.text_input("Input Directory Path:", value="d:/XYH/DCproject/data_store/raw_inputs")
+    st.write("Provide an input directory OR upload image files directly:")
+    
+    # 选项1: 本地路径输入 (Local Path Input)
+    input_dir = st.text_input("Local Directory Path:", value=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_store", "raw_inputs"))
+    
+    # 选项2: 多文件上传 (Multiple files upload)
+    uploaded_files = st.file_uploader("Or Upload Image Files", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'bmp', 'tiff'])
     
     # 触发按钮
     if st.button("Start Batch Pipeline"):
+        # 如果用户上传了文件，先保存到一个本地临时目录中
+        if uploaded_files:
+            upload_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_store", "raw_inputs_uploaded")
+            os.makedirs(upload_dir, exist_ok=True)
+            # 清空旧数据以防混淆
+            for f in os.listdir(upload_dir):
+                os.remove(os.path.join(upload_dir, f))
+                
+            for uploaded_file in uploaded_files:
+                with open(os.path.join(upload_dir, uploaded_file.name), "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                    
+            input_dir = upload_dir # 使用我们刚刚保存了上传文件的路径
+            
         st.write(f"? Starting analysis on: {input_dir}")
         
         try:

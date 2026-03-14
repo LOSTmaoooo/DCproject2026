@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import sys
 import shutil
@@ -89,12 +90,16 @@ class BatchPipeline:
             interim_dir = os.path.join(output_dir, 'interim_ncd_data')
             
             # 使用 DataBridge 进行转换
-            # 它负责将 MuSc 的 .npy 热力图转为 NCD 需要的 dataset 结构 (images/masks)
-            dataset_ready_path = self.run_bridge(input_dir, maps_dir, interim_dir)
+            # 它负责将 MuSc 的 .npy 热力图转换为 AnomalyNCD 所需的 MTD 布局
+            # 返回 dict: {'images_path': ..., 'anomaly_maps_path': ...}
+            bridge_result = self.run_bridge(input_dir, maps_dir, interim_dir)
             
-            if not dataset_ready_path:
+            if not bridge_result:
                 print("[BatchPipeline] DataBridge failed.")
                 return False
+                
+            dataset_images_path = bridge_result['images_path']
+            dataset_maps_path   = bridge_result['anomaly_maps_path']
                 
         except Exception as e:
             print(f"[BatchPipeline] Error in DataBridge step: {e}")
@@ -118,9 +123,9 @@ class BatchPipeline:
                  os.makedirs(base_data_path, exist_ok=True)
             
             # 调用 run_ncd 方法执行聚类分析
-            # 注意：这里的输入 dataset_path 变成了 DataBridge 处理后的路径
-            # maps_dir 依然传入，以备 NCD 内部需要原始 heatmaps
-            success = self.run_ncd(dataset_ready_path, maps_dir, base_data_path, output_dir)
+            # dataset_images_path : 原始图像的 MTD 布局根目录 (images/<anomaly_type>/)
+            # dataset_maps_path   : PNG 异常图的组织目录 (anomaly_maps/<category>/<anomaly_type>/)
+            success = self.run_ncd(dataset_images_path, dataset_maps_path, base_data_path, output_dir)
             if not success:
                 print("[BatchPipeline] AnomalyNCD step failed.")
                 return False
@@ -180,16 +185,10 @@ class BatchPipeline:
         bridge = DataBridge() # 使用默认阈值，如有需要可传入参数
         
         print(f"[Engine] Bridging data from {input_images} to {output_dir}")
-        # data_bridge.prepare_ncd_dataset 应该返回处理后的有效数据目录
-        # 假设它返回的是 output_dir 或者 output_dir 下的具体子目录
-        # 根据 data_bridge.py 的逻辑，它会创建 output_dir/unknown_batch/images 等
-        
-        bridge.prepare_ncd_dataset(input_images, input_maps, output_dir)
-        
-        # 由于 AnomalyNCD 可能需要只要 root 目录，或者具体的子目录
-        # 这里我们返回 output_dir，并在 wrapper 中处理具体路径，或者这里返回具体子目录
-        # 假设 prepare_ncd_dataset 创建了标准结构，我们返回 output_dir 即可
-        return output_dir
+        # prepare_ncd_dataset 返回 {'images_path': ..., 'anomaly_maps_path': ...}
+        # prepare_ncd_dataset 返回 {'images_path': ..., 'anomaly_maps_path': ...}
+        result = bridge.prepare_ncd_dataset(input_images, input_maps, output_dir)
+        return result  # None on failure, dict on success
 
     def run_ncd(self, dataset_path, anomaly_map_path, base_path, output_root):
         """

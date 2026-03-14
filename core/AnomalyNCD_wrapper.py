@@ -3,7 +3,6 @@ import os
 import sys
 import argparse
 import torch
-from utils.load_config import load_yaml 
 
 # =================================================================================================
 # 模块：AnomalyNCD 封装器 (AnomalyNCD Wrapper)
@@ -13,10 +12,16 @@ from utils.load_config import load_yaml
 # -------------------------------------------------------------------------------------------------
 # 路径配置与动态导入
 # -------------------------------------------------------------------------------------------------
-# 动态将 libs/AnomalyNCD 添加到系统路径
+# 清除可能与 AnomalyNCD 命名空间冲突的缓存模块 (例如 MuSc 中的 utils 模块)
+for mod in ['utils', 'models', 'datasets']:
+    if mod in sys.modules:
+        del sys.modules[mod]
+
+# 动态将 libs/AnomalyNCD 添加到系统路径的最前面
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NCD_PATH = os.path.join(PROJECT_ROOT, 'libs', 'AnomalyNCD')
-sys.path.append(NCD_PATH)
+if NCD_PATH not in sys.path:
+    sys.path.insert(0, NCD_PATH)
 
 from models.AnomalyNCD import AnomalyNCD
 from utils.general_utils import load_yaml as ncd_load_yaml
@@ -85,8 +90,10 @@ class AnomalyNCDWrapper:
             'base_data_path': base_data_path,
             
             # --- 数据集元数据 ---
-            'dataset': 'custom',  # 数据集类型
-            'category': 'unknown',# 类别名称
+            # 使用 'custom' 布局：origin_image_path/<anomaly_type>/img.png
+            # 已经在 AnomalyNCD.binarization() 中新增了 custom 的支持
+            'dataset': 'custom',     # 数据集类型
+            'category': 'unknown',# 类别名称，需与 DataBridge.CATEGORY_NAME 保持一致
             
             # --- 实验控制 ---
             'config': self.config_path,

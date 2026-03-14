@@ -210,7 +210,7 @@ class AnomalyNCD():
         # temperature for area average
         if self.args.dataset == 'mvtec':
             temps = [100]
-        else:
+        else: # defaults to 50 for mtd, custom
             temps = [50]
 
         masks = np.array([])
@@ -369,11 +369,11 @@ class AnomalyNCD():
             if dataset_name.lower() == 'mvtec':
                 img_file_path = f"{origin_image_path}/{product_name}/test/{anomaly_type}"
                 anomaly_map_file_path = f"{anomaly_map_path}/{product_name}/{anomaly_type}"
-            elif dataset_name.lower() == 'mtd':
+            elif dataset_name.lower() in ['mtd', 'custom']:
                 img_file_path = f"{origin_image_path}/{anomaly_type}"
                 anomaly_map_file_path = f"{anomaly_map_path}/{product_name}/{anomaly_type}"
             else:
-                raise NotImplementedError("Dataset not supported")
+                raise NotImplementedError(f"Dataset {dataset_name} not supported")
             tmp_img_file_list = sorted(os.listdir(img_file_path))
             tmp_anomaly_map_file_list = sorted(os.listdir(anomaly_map_file_path))
 

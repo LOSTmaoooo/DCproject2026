@@ -18,10 +18,16 @@ from tqdm import tqdm
 # -------------------------------------------------------------------------------------------------
 # 路径配置与动态导入
 # -------------------------------------------------------------------------------------------------
-# 动态将 libs/MuSc 添加到系统路径，以便可以导入原始 MuSc 库中的模块
+# 清除可能与 MuSc 命名空间冲突的缓存模块 (例如 AnomalyNCD 中的 utils 模块)
+for mod in ['utils', 'models', 'datasets']:
+    if mod in sys.modules:
+        del sys.modules[mod]
+
+# 动态将 libs/MuSc 添加到系统路径的最前面
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MUSC_PATH = os.path.join(PROJECT_ROOT, 'libs', 'MuSc')
-sys.path.append(MUSC_PATH)
+if MUSC_PATH not in sys.path:
+    sys.path.insert(0, MUSC_PATH)
 
 # 从 MuSc 库中导入核心模型和工具
 try:
