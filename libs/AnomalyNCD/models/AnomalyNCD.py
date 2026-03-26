@@ -366,6 +366,10 @@ class AnomalyNCD():
             anomaly_type_list.remove("combined")
 
         for anomaly_type in anomaly_type_list:
+            # Explicitly print dataset info for debugging
+            if dataset_name.lower() not in ['mvtec', 'mtd', 'custom']:
+                 print(f"[AnomalyNCD] Warning: Unknown dataset name '{dataset_name}'. Using default MTD/Custom path structure.")
+
             if dataset_name.lower() == 'mvtec':
                 img_file_path = f"{origin_image_path}/{product_name}/test/{anomaly_type}"
                 anomaly_map_file_path = f"{anomaly_map_path}/{product_name}/{anomaly_type}"
@@ -373,7 +377,10 @@ class AnomalyNCD():
                 img_file_path = f"{origin_image_path}/{anomaly_type}"
                 anomaly_map_file_path = f"{anomaly_map_path}/{product_name}/{anomaly_type}"
             else:
-                raise NotImplementedError(f"Dataset {dataset_name} not supported")
+                # Fallback for compatible datasets
+                img_file_path = f"{origin_image_path}/{anomaly_type}"
+                anomaly_map_file_path = f"{anomaly_map_path}/{product_name}/{anomaly_type}"
+                
             tmp_img_file_list = sorted(os.listdir(img_file_path))
             tmp_anomaly_map_file_list = sorted(os.listdir(anomaly_map_file_path))
 
