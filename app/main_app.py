@@ -1,139 +1,164 @@
 # -*- coding: utf-8 -*-
-# =================================================================================================
-# 模块：主应用程序入口 (Main Application Entry)
-# 文件名：main_app.py
-# 功能：
-#   1. 构建基于 Streamlit 的 Web 用户界面，作为系统的交互前端。
-#   2. 管理系统的不同运行模式（训练、单流推理、批量分析）。
-#   3. 处理用户输入（文件上传、参数设置）并调用底层核心引擎 (Core Engine)。
-#   4. 实时显示处理进度和结果反馈。
-# =================================================================================================
+"""FastAPI 后端入口。
 
-import streamlit as st  # 导入 Streamlit 库，用于构建 Web 界面 (Syntax: import 库名 as 别名)
-import sys              # 导入 sys 模块，用于处理 Python 运行时环境
-import os               # 导入 os 模块，用于处理文件路径和操作系统交互
+职责：
+1. 暴露 3 个模式的 API（当前重点是 Mode 3 批处理）。
+2. 接收 ZIP 数据并调用 `core.engine.BatchPipeline` 执行异常识别流水线。
+3. 统一返回结构，便于前端与外部系统集成。
+"""
 
-# --- 路径配置 (System Path Configuration) ---
-# 将项目根目录添加到 Python 的模块搜索路径 (sys.path) 中。
-# 作用：确保代码可以从项目根目录导入 'core', 'libs' 等自定义模块。
-# 语法详解：
-#   __file__: 当前脚本文件的路径变量。
-#   os.path.dirname(): 获取路径中的目录部分。
-#   os.path.join(..., '..'): 拼接路径，'..' 表示上一级目录。
-#   os.path.abspath(): 将相对路径转换为绝对路径。
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import os
+import shutil
+import sys
+import traceback
+import zipfile
+from typing import Any, Optional
 
-# --- 页面基础配置 (Page Configuration) ---
-# 设置 Streamlit 页面的标题、图标、布局方式等元数据。
-# 必须是 Streamlit 命令中的第一个调用。
-st.set_page_config(
-    page_title="Anomaly Detection System",  # 浏览器标签页标题
-    page_icon="🔍",                         # 浏览器标签页图标
-    layout="wide",                          # 页面布局模式：'centered' (居中) 或 'wide' (宽屏)
-    initial_sidebar_state="expanded",       # 侧边栏初始状态：'expanded' (展开)
+import uvicorn
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# 将项目根目录加入模块搜索路径，确保可导入 `core` 等包。
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+try:
+    from core.engine import BatchPipeline
+except ImportError as import_error:
+    print(f"Error importing core engine: {import_error}")
+    BatchPipeline = None
+
+
+app = FastAPI(
+    title="Industrial Anomaly Detection API",
+    description="Backend API supporting 3 Operation Modes",
+    version="1.0.0",
+    docs_url="/docs",
 )
 
-# --- 界面标题 (UI Header) ---
-st.title("Industrial Anomaly Detection System")  # 显示主标题 (H1)
-st.markdown("---")                               # 显示水平分割线 (Markdown 语法)
-
-# --- 侧边栏模式选择 (Sidebar Mode Selection) ---
-st.sidebar.title("System Mode")  # 侧边栏标题
-
-# 创建单选按钮组，让用户选择系统运行模式。
-# st.sidebar.radio 返回用户选中的选项字符串。
-mode = st.sidebar.radio(
-    "Select Operation Mode:",
-    ("Mode 1: Model Training & Registration", 
-     "Mode 2: Single Stream Inference", 
-     "Mode 3: Batch Analysis (Focus)")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ==============================================================================
-# 模式 3: 批量分析 (Batch Analysis) - 核心功能区
-# ==============================================================================
-if mode == "Mode 3: Batch Analysis (Focus)":
-    st.header("Mode 3: Batch Analysis")  # 显示二级标题 (H2)
-    
-    # 显示信息提示框，说明该模式的功能
-    st.info("Upload a folder of images or Select a local directory to process a batch of images for Novel Class Discovery.")
-    
-    st.write("Provide an input directory OR upload image files directly:") # 显示普通文本
-    
-    # --- 输入源 1: 本地目录路径 ---
-    # 获取默认的输入目录路径：项目根目录/data_store/raw_inputs
-    default_input_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_store", "raw_inputs")
-    
-    # 创建文本输入框，允许用户手动修改本地目录路径
-    input_dir = st.text_input("Local Directory Path:", value=default_input_path)
-    
-    # --- 输入源 2: 文件上传 ---
-    # 创建文件上传组件，允许上传多个文件，限制类型为常见图片格式。
-    uploaded_files = st.file_uploader("Or Upload Image Files", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'bmp', 'tiff'])
-    
-    # --- 执行按钮 (Action Button) ---
-    # st.button 创建一个按钮，当用户点击时返回 True。
-    if st.button("Start Batch Pipeline"):
-        # 1. 处理上传的文件 (如果存在)
-        if uploaded_files:
-            # 定义上传文件的临时保存目录
-            upload_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data_store", "raw_inputs_uploaded")
-            os.makedirs(upload_dir, exist_ok=True) # 创建目录，如果存在则忽略 (exist_ok=True)
-            
-            # 清空该目录下的旧文件，防止干扰
-            for f in os.listdir(upload_dir):
-                os.remove(os.path.join(upload_dir, f))
-                
-            # 将上传的内存文件写入硬盘
-            for uploaded_file in uploaded_files:
-                # uploaded_file 是一个类似文件的对象
-                # uploaded_file.name 获取文件名
-                # uploaded_file.getbuffer() 获取文件内容的字节流
-                with open(os.path.join(upload_dir, uploaded_file.name), "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-            
-            # 如果使用了上传功能，将输入目录指向上传目录
-            input_dir = upload_dir 
-            
-        st.write(f"🚀 Starting analysis on: {input_dir}")
-        
-        # 2. 调用核心处理逻辑
-        try:
-            # 动态导入核心引擎模块，避免在脚本启动时就加载重型依赖
-            from core.engine import BatchPipeline
-            
-            # 实例化处理流水线对象
-            pipeline = BatchPipeline()
-            
-            # 使用 st.spinner 显示加载动画，直到代码块执行完毕
-            with st.spinner('Running Batch Analysis Pipeline... (This may take several minutes)'):
-                # 运行流水线，传入输入目录
-                success = pipeline.run(input_dir)
-                
-            # 根据返回结果显示成功或失败信息
-            if success:
-                st.success("✅ Analysis Complete! Results saved to data_store/results.")
-            else:
-                st.error("❌ Pipeline Failed. Please check the terminal for error details.")
-                
-        except ImportError as e:
-            # 捕获导入错误 (通常是因为路径问题或依赖未安装)
-            st.error(f"Import Error: {e}")
-            st.error("Ensure 'core' is in python path and dependencies are installed.")
-        except Exception as e:
-            # 捕获所有其他运行时异常，并在界面上显示错误信息
-            st.error(f"An error occurred: {e}")
 
-# ==============================================================================
-# 模式 1: 模型训练 (占位符)
-# ==============================================================================
-elif mode == "Mode 1: Model Training & Registration":
-    st.header("Mode 1: Training & Setup")
-    st.warning("This mode is for registering new parts and training the classifier.")
+class ResponseModel(BaseModel):
+    """统一响应体。"""
 
-# ==============================================================================
-# 模式 2: 实时推理 (占位符)
-# ==============================================================================
-elif mode == "Mode 2: Single Stream Inference":
-    st.header("Mode 2: Live Inference")
-    st.warning("This mode is for real-time single image checking.")
+    code: int
+    msg: str
+    data: Optional[Any] = None
+
+
+def success_response(data: Any = None, msg: str = "请求成功"):
+    return {"code": 200, "msg": msg, "data": data}
+
+
+def error_response(code: int, msg: str):
+    return {"code": code, "msg": msg, "data": None}
+
+
+@app.post("/api/v1/mode1/register", response_model=ResponseModel, tags=["Mode 1: Training"])
+async def register_new_part(part_name: str = Form(...), images: UploadFile = File(...)):
+    """模式1占位接口：零件注册与训练触发（尚未接入实际训练流程）。"""
+    _ = images
+    return success_response(msg=f"Mode 1: Registered part '{part_name}'. Training feature is under development.")
+
+
+@app.post("/api/v1/mode2/predict", response_model=ResponseModel, tags=["Mode 2: Inference"])
+async def single_stream_inference(image: UploadFile = File(...)):
+    """模式2占位接口：单图实时推理（当前返回示例结果）。"""
+    _ = image
+    return success_response(
+        data={"anomaly_score": 0.0, "is_anomaly": False},
+        msg="Mode 2: Single inference feature is under development.",
+    )
+
+
+@app.post("/api/v1/mode3/batch_analysis", response_model=ResponseModel, tags=["Mode 3: Batch Analysis"])
+async def start_batch_analysis(file: UploadFile = File(..., description="ZIP file containing dataset or images")):
+    """模式3批处理接口。
+
+    处理流程：
+    1. 接收 ZIP 包并解压到临时目录。
+    2. 自动定位有效输入目录（兼容单层目录嵌套）。
+    3. 调用 `BatchPipeline.run(input_dir)` 执行完整流水线。
+    4. 返回结果目录位置。
+    """
+    if BatchPipeline is None:
+        return error_response(500, "后端核心模块（BatchPipeline）导入失败")
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    upload_dir = os.path.join(project_root, "data_store", "api_uploads")
+
+    # Demo 场景下每次请求清空目录；生产环境建议改为“每任务唯一目录”。
+    if os.path.exists(upload_dir):
+        shutil.rmtree(upload_dir)
+    os.makedirs(upload_dir, exist_ok=True)
+
+    extract_base_path = os.path.join(upload_dir, "extracted")
+    os.makedirs(extract_base_path, exist_ok=True)
+
+    try:
+        file_name = file.filename or "uploaded.zip"
+        file_path = os.path.join(upload_dir, file_name)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        input_dir = extract_base_path
+
+        if file_name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(file_path, "r") as zip_ref:
+                    zip_ref.extractall(extract_base_path)
+            except zipfile.BadZipFile:
+                return error_response(400, "无效的 ZIP 文件")
+        else:
+            return error_response(400, "请上传 ZIP 压缩包")
+
+        subdirs = [
+            item
+            for item in os.listdir(extract_base_path)
+            if os.path.isdir(os.path.join(extract_base_path, item))
+        ]
+
+        if len(subdirs) == 1:
+            potential_root = os.path.join(extract_base_path, subdirs[0])
+            has_images = any(
+                name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tiff"))
+                for name in os.listdir(potential_root)
+            )
+            if has_images or os.path.isdir(potential_root):
+                input_dir = potential_root
+
+        print(f"[API] Resolved input directory to: {input_dir}")
+        print("[API] Starting batch pipeline...")
+
+        pipeline = BatchPipeline()
+        success = pipeline.run(input_dir)
+
+        if success:
+            result_root = os.path.join(project_root, "data_store", "results")
+            return success_response(
+                data={
+                    "status": "finished",
+                    "result_dir": result_root,
+                    "info": "Results are saved in data_store/results on the server.",
+                },
+                msg="批处理异常识别执行成功",
+            )
+
+        return error_response(500, "批处理流水线执行失败（请查看终端日志）")
+
+    except Exception as run_error:
+        traceback.print_exc()
+        return error_response(500, f"服务器内部错误: {run_error}")
+
+
+if __name__ == "__main__":
+    print("API Server starting...")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
