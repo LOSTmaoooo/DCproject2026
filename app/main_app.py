@@ -10,10 +10,14 @@
 import os
 import shutil
 import sys
+import time
 import traceback
 import zipfile
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +31,12 @@ try:
 except ImportError as import_error:
     print(f"Error importing core engine: {import_error}")
     BatchPipeline = None
+
+try:
+    from core.musc_wrapper import MuScWrapper
+except ImportError as import_error:
+    print(f"Error importing MuSc wrapper: {import_error}")
+    MuScWrapper = None
 
 
 app = FastAPI(
@@ -45,6 +55,12 @@ app.add_middleware(
 )
 
 
+UNKNOWN_THRESHOLD = 0.5
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tiff")
+MODEL_EXTS = (".pt", ".pth", ".ckpt", ".bin")
+_MUSC_WRAPPER = None
+
+
 class ResponseModel(BaseModel):
     """统一响应体。"""
 
@@ -61,6 +77,52 @@ def error_response(code: int, msg: str):
     return {"code": code, "msg": msg, "data": None}
 
 
+def _normalize_score(map_path: str) -> float:
+    if not os.path.exists(map_path):
+        return 0.0
+    anomaly_map = np.load(map_path)
+    if anomaly_map.size == 0:
+        return 0.0
+    score = float(anomaly_map.max())
+    if score > 1.0:
+        score = score / 255.0
+    return float(max(0.0, min(1.0, score)))
+
+
+def _score_to_cluster(score: float) -> int:
+    return 1 if score >= UNKNOWN_THRESHOLD else 0
+
+
+def _get_musc_wrapper(project_root: str):
+    global _MUSC_WRAPPER
+    if MuScWrapper is None:
+        return None
+    if _MUSC_WRAPPER is None:
+        config_path = os.path.join(project_root, "libs", "MuSc", "configs", "musc.yaml")
+        _MUSC_WRAPPER = MuScWrapper(config_path=config_path)
+    return _MUSC_WRAPPER
+
+
+def _resolve_model_path(project_root: str, model_name_or_path: str) -> str:
+    if not model_name_or_path:
+        return ""
+    if os.path.isabs(model_name_or_path):
+        return model_name_or_path if os.path.exists(model_name_or_path) else ""
+
+    models_root = os.path.join(project_root, "models_store")
+    candidate = os.path.join(models_root, model_name_or_path)
+    if os.path.exists(candidate):
+        return candidate
+
+    for current_root, _, files in os.walk(models_root):
+        for file_name in files:
+            if not file_name.lower().endswith(MODEL_EXTS):
+                continue
+            if file_name == model_name_or_path:
+                return os.path.join(current_root, file_name)
+    return ""
+
+
 @app.post("/api/v1/mode1/register", response_model=ResponseModel, tags=["Mode 1: Training"])
 async def register_new_part(part_name: str = Form(...), images: UploadFile = File(...)):
     """模式1占位接口：零件注册与训练触发（尚未接入实际训练流程）。"""
@@ -69,13 +131,70 @@ async def register_new_part(part_name: str = Form(...), images: UploadFile = Fil
 
 
 @app.post("/api/v1/mode2/predict", response_model=ResponseModel, tags=["Mode 2: Inference"])
-async def single_stream_inference(image: UploadFile = File(...)):
-    """模式2占位接口：单图实时推理（当前返回示例结果）。"""
-    _ = image
-    return success_response(
-        data={"anomaly_score": 0.0, "is_anomaly": False},
-        msg="Mode 2: Single inference feature is under development.",
-    )
+async def single_stream_inference(
+    image: UploadFile = File(..., description="Single image for online inference"),
+    model_name: str = Form(default=""),
+):
+    """模式2在线接口：单张图像同步推理，拍照后可直接调用。"""
+    if MuScWrapper is None:
+        return error_response(500, "后端核心模块（MuScWrapper）导入失败")
+
+    image_name = image.filename or "input.png"
+    if not image_name.lower().endswith(IMAGE_EXTS):
+        return error_response(400, "仅支持图片文件（png/jpg/jpeg/bmp/tiff）")
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    request_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    request_root = os.path.join(project_root, "data_store", "results", f"online_{request_id}")
+    input_dir = os.path.join(request_root, "input")
+    maps_dir = os.path.join(request_root, "anomaly_maps")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(maps_dir, exist_ok=True)
+
+    input_path = os.path.join(input_dir, image_name)
+    with open(input_path, "wb") as image_file:
+        shutil.copyfileobj(image.file, image_file)
+
+    resolved_model_path = _resolve_model_path(project_root, model_name)
+
+    try:
+        wrapper = _get_musc_wrapper(project_root)
+        if wrapper is None:
+            return error_response(500, "MuScWrapper 初始化失败")
+
+        start_time = time.perf_counter()
+        wrapper.generate_anomaly_maps(input_dir, maps_dir)
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
+
+        stem = Path(image_name).stem
+        map_path = os.path.join(maps_dir, f"{stem}_map.npy")
+        score = _normalize_score(map_path)
+        cluster_id = _score_to_cluster(score)
+
+        return success_response(
+            data={
+                "image": image_name,
+                "score": round(score, 6),
+                "cluster_id": cluster_id,
+                "anomaly_type": str(cluster_id),
+                "is_unknown": False,
+                "paths": {
+                    "input": input_path,
+                    "anomaly_map": map_path if os.path.exists(map_path) else "",
+                },
+                "meta": {
+                    "threshold": UNKNOWN_THRESHOLD,
+                    "latency_ms": latency_ms,
+                    "model_name": model_name,
+                    "resolved_model_path": resolved_model_path,
+                    "request_dir": request_root,
+                },
+            },
+            msg="单张在线推理成功",
+        )
+    except Exception as run_error:
+        traceback.print_exc()
+        return error_response(500, f"单张在线推理失败: {run_error}")
 
 
 @app.post("/api/v1/mode3/batch_analysis", response_model=ResponseModel, tags=["Mode 3: Batch Analysis"])
