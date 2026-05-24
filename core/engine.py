@@ -1,231 +1,217 @@
 # -*- coding: utf-8 -*-
 # =================================================================================================
-# 模块：核心执行引�? (Core Execution Engine)
+# 模块：核心执行引擎 (Core Execution Engine)
 # 文件名：engine.py
-# 功能�?
-#   1. 作为系统的中枢控制器，协调各�?子模块（MuSc, DataBridge, AnomalyNCD）的协同工作�?
-#   2. 定义并执行批量�?�理流水�? (BatchPipeline)，�?�理数据流的传递�?
-#   3. 处理模块间的�?径映射和资源初�?�化�?
+# 功能：
+#   1. 作为系统的总控中枢，协调各子模块（MuSc, DataBridge, AnomalyNCD）的无缝协同。
+#   2. 串联并执行全新的结构化批量处理流水线 (BatchPipeline)，彻底告别平铺数据流。
+#   3. 实现动态路径路由与跨模块间的资源动态解耦。
 # =================================================================================================
 
 import os
 import sys
-import shutil
 
 # -------------------------------------------------------------------------------------------------
-# 全局�?径配�? (Global Path Configuration)
+# 全局路径配置 (Global Path Configuration)
 # -------------------------------------------------------------------------------------------------
-# 动态获取项�?根目录，�?保代码在不同�?境下都能正确找到资源�?
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # 获取当前文件的上上级�?�?
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 定义关键子目录路�?
-LIBS_PATH = os.path.join(PROJECT_ROOT, 'libs')        # �?三方�?/算法库目�?
-MUSC_PATH = os.path.join(LIBS_PATH, 'MuSc')           # MuSc 算法�?�?
-NCD_PATH = os.path.join(LIBS_PATH, 'AnomalyNCD')      # AnomalyNCD 算法�?�?
+LIBS_PATH = os.path.join(PROJECT_ROOT, 'libs')        
+MUSC_PATH = os.path.join(LIBS_PATH, 'MuSc')           
+NCD_PATH = os.path.join(LIBS_PATH, 'AnomalyNCD')      
 
-# �? core �?录加入系统路径，使其他模块可以�?�入 core 包下的内�?
 sys.path.append(os.path.join(PROJECT_ROOT, 'core'))
 
 class BatchPipeline:
     """
-    类：批量处理流水�? (Batch Processing Pipeline)
+    类：批量处理流水线 (Batch Processing Pipeline)
     
-    功能�?
-        封�?�了完整的异常�?�测和新类发现流程�?
-        实现�? "MuSc生成�?力图 -> DataBridge格式�?�? -> AnomalyNCD聚类分析" 的逻辑串联�?
+    功能：
+        管理并执行从“MuSc结构化特征图生成 -> DataBridge语义分流与格式转换 -> AnomalyNCD高阶聚类发现”的完整流水线。
     """
     
     def __init__(self):
         """
-        构造函数：初�?�化流水线状态�?
-        注意：Wrapper 类采用延迟初始化 (Lazy Loading) 策略，初始�?�为 None�?
-        好�?�是�?动引擎时不需要立即加载显存占用大的模型，�?有在真�?�运行时才加载�?
+        构造函数：初始化算法包装器状态（采用延迟加载策略，避免初始化时过度占用显存）。
         """
-        self.musc_wrapper = None # MuSc 算法封�?�器实例
-        self.ncd_wrapper = None  # AnomalyNCD 算法封�?�器实例
+        self.musc_wrapper = None # MuSc 算法封装器实例
+        self.ncd_wrapper = None  # AnomalyNCD 算法封装器实例
         
-        #设置默�?�的结果输出根目录：data_store/results
+        # 设置默认的结果输出根目录
         self.output_base = os.path.join(PROJECT_ROOT, 'data_store', 'results')
-        # �?保输出目录存�?，�?�果不存在则创建
         os.makedirs(self.output_base, exist_ok=True)
         
-    def run(self, input_dir, output_dir=None):
+    def run(self, input_dir, output_dir=None, category_name="custom_dataset"):
         """
         方法：执行完整流水线 (Run Pipeline)
         
         参数:
-            input_dir (str): 输入�?录，包含待�?�测的原�?�图像�?
-            output_dir (str, optional): 结果保存�?径。�?�果不指定，则自动生成带时间戳的�?录�?
+            input_dir (str): 前端解压后的结构化原图目录（包含 known_normal, known_crack... ）。
+            output_dir (str, optional): 结果保存路径。如果不指定，则自动生成带时间戳的目录。
+            category_name (str): 动态数据集类别名称，将透传给下游算法。
             
         返回:
-            bool: 流水线执行成功返�? True，失败返�? False�?
+            bool: 流水线执行成功返回 True，失败返回 False。
         """
         import time
-        # 生成格式化的时间戳字符串 (例�??: 20231027_103000)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         
-        # 如果�?指定输出�?录，则在 base �?录下创建一�?新目�?
         if output_dir is None:
             output_dir = os.path.join(self.output_base, f"run_{timestamp}")
             
         os.makedirs(output_dir, exist_ok=True)
-        print(f"[BatchPipeline] Pipeline started on {input_dir}")
-        print(f"[BatchPipeline] Results will be saved to {output_dir}")
+        print(f"[BatchPipeline] Pipeline started with input: {input_dir}")
+        print(f"[BatchPipeline] Active Category Name: {category_name}")
+        print(f"[BatchPipeline] Target Results Directory: {output_dir}")
         
         # =========================================================================
-        # 阶�?? 1: 运�?? MuSc 生成异常�?力图 (Anomaly Map Generation)
+        # 阶段 1: 运行 MuSc 递归生成结构化异常热力图
         # =========================================================================
-        print("\n--- Step 1: Running MuSc (Anomaly Map Generation) ---")
+        print("\n--- Step 1: Running MuSc (Structural Anomaly Map Generation) ---")
         try:
-            # 调用内部方法 run_musc
-            # 输入：原始图片目�?
-            # 输出：生成的 .npy �?力图所在的�?录路�?
-            maps_dir = self.run_musc(input_dir, output_dir)
+            musc_maps_tmp = os.path.join(output_dir, 'musc_maps')
+            maps_dir = self.run_musc(input_dir, musc_maps_tmp)
             
-            # 校验结果：�?�果�?径为空，说明 MuSc 运�?�失败或�?生成文件
             if not maps_dir:
-                print("[BatchPipeline] MuSc failed or produced no output.")
+                print("[BatchPipeline] Critical Error: MuSc pipeline failed or produced no output.")
                 return False
+                
+            # ==========================================
+            # 🚀 核心修复点：强制释放 MuSc 占用的巨量显存
+            # ==========================================
+            print("[BatchPipeline] Unloading MuSc model and clearing GPU cache...")
+            if self.musc_wrapper is not None:
+                del self.musc_wrapper       # 删掉 Python 对象引用
+                self.musc_wrapper = None    # 重置指针
+                
+                import torch
+                import gc
+                gc.collect()                # 强制 Python 垃圾回收
+                torch.cuda.empty_cache()    # 强制清空 PyTorch 在 GPU 上的显存缓存
+                print("[BatchPipeline] GPU memory successfully released for AnomalyNCD.")
+                
         except Exception as e:
-            # 异常处理：打印错�?并打印堆栈跟�?，方便调�?
-            print(f"[BatchPipeline] Error in MuSc step: {e}")
+            print(f"[BatchPipeline] Exception caught in MuSc step: {e}")
             import traceback
             traceback.print_exc()
             return False
 
         # =========================================================================
-        # 阶�?? 2: 运�?? DataBridge 数据�?�? (Format Conversion)
+        # 阶段 2: 运行 DataBridge 语义路由分流（核心中枢转换）
         # =========================================================================
-        print("\n--- Step 1.5: Running DataBridge (Format Conversion) ---")
+        print("\n--- Step 2: Running DataBridge (Semantic Routing & Format Conversion) ---")
         try:
-            # 定义�?间数�?的存储目�?
-            interim_dir = os.path.join(output_dir, 'interim_ncd_data')
-            
-            # 调用 run_bridge 进�?�转�?
-            # 作用：将 MuSc 的输�? (.npy) �?�?�? AnomalyNCD 需要的�?录结构和格式 (.png)
-            # 返回值：一�?字典，包�?�?换后的图像路径和�?力图�?�?
-            bridge_result = self.run_bridge(input_dir, maps_dir, interim_dir)
+            # 调用重构后的桥接器，动态完成已知/未知异常与正常参考样本的分流
+            bridge_result = self.run_bridge(input_dir, maps_dir, output_dir, category_name)
             
             if not bridge_result:
-                print("[BatchPipeline] DataBridge failed.")
+                print("[BatchPipeline] Critical Error: DataBridge semantic routing failed.")
                 return False
                 
-            # 提取�?换后的路径，准�?�传给下一�?
-            dataset_images_path = bridge_result['images_path']
-            dataset_maps_path   = bridge_result['anomaly_maps_path']
+            # 动态提取分流搭建好的 MTD 数据集标准路径
+            base_data_path    = bridge_result['base_data_path']     # 提取出的正常参考样本
+            dataset_images_path = bridge_result['images_path']        # 待分析原图树
+            dataset_maps_path   = bridge_result['anomaly_maps_path']   # 转换后的 PNG 热力图树
+            active_category     = bridge_result['category_name']       # 激活的类别名
                 
         except Exception as e:
-            print(f"[BatchPipeline] Error in DataBridge step: {e}")
+            print(f"[BatchPipeline] Exception caught in DataBridge step: {e}")
             import traceback
             traceback.print_exc()
             return False
             
         # =========================================================================
-        # 阶�?? 3: 运�?? AnomalyNCD 新类发现 (Novel Class Discovery)
+        # 阶段 3: 运行 AnomalyNCD 新类发现（精准投喂）
         # =========================================================================
-        print("\n--- Step 2: Running AnomalyNCD (Novel Class Discovery) ---")
+        print("\n--- Step 3: Running AnomalyNCD (Novel Class Discovery Clustering) ---")
         try: 
-            # 指定正常样本的参考数�?集路�? (Normal Reference Data)
-            # AnomalyNCD 算法通常需要�?�比正常样本来区分异常类型�?
-            base_data_path = os.path.join(PROJECT_ROOT, 'data_store', 'raw_inputs', 'normal_ref') 
-            
-            # 防御性编程：如果参考目录不存在，创建一�?空目录防止程序崩�?
-            # 注意：在实际生产�?境中，这里应该报错或提示用户提供正常样本
-            if not os.path.exists(base_data_path):
-                 print(f"[BatchPipeline] Warning: Base data path {base_data_path} not found. Creating empty.")
-                 os.makedirs(base_data_path, exist_ok=True)
-            
-            # 调用 run_ncd 执�?�核心聚类逻辑
-            success = self.run_ncd(dataset_images_path, dataset_maps_path, base_data_path, output_dir)
+            # 彻底废除旧版的硬编码路径，精准投喂从桥接器解耦出来的三个核心路径和动态类别名
+            success = self.run_ncd(
+                dataset_path=dataset_images_path, 
+                anomaly_map_path=dataset_maps_path, 
+                base_path=base_data_path, 
+                output_root=output_dir,
+                category_name=active_category
+            )
             
             if not success:
-                print("[BatchPipeline] AnomalyNCD step failed.")
+                print("[BatchPipeline] Critical Error: AnomalyNCD clustering step failed.")
                 return False
                 
         except Exception as e:
-            print(f"[BatchPipeline] Error in AnomalyNCD step: {e}")
+            print(f"[BatchPipeline] Exception caught in AnomalyNCD step: {e}")
             import traceback
             traceback.print_exc()
             return False
         
-        print(f"\n[BatchPipeline] Pipeline finished successfully. Results in {output_dir}")
+        # 流程圆满结束后，可以考虑选择性清理临时的 musc_maps 目录以节省服务器空间
+        try:
+            if os.path.exists(musc_maps_tmp):
+                import shutil
+                shutil.rmtree(musc_maps_tmp)
+                print("[BatchPipeline] Cleaned up temporary MuSc .npy directory.")
+        except Exception:
+            pass
+
+        print(f"\n[BatchPipeline] Pipeline finished successfully! All aligned results are stored under: {output_dir}")
         return True
 
     def run_musc(self, input_dir, output_root):
         """
-        方法：封�? MuSc 算法的调用逻辑
-        
-        返回:
-            str: 生成的异常图 (.npy 文件) 所在的具体�?录路径，失败返回 None�?
+        方法：调用重构后的 MuSc 包装器
         """
-        from core.musc_wrapper import MuScWrapper  # 局部�?�入，避免循�?依赖
+        from core.musc_wrapper import MuScWrapper  
         
-        # 配置文件�?�?
         config_path = os.path.join(MUSC_PATH, 'configs', 'musc.yaml')
-        # 输出子目�?
-        maps_output_dir = os.path.join(output_root, 'anomaly_maps')
         
-        # 懒加载：如果�?�?一次调�?，则初�?�化 Wrapper 实例
         if self.musc_wrapper is None:
             if not os.path.exists(config_path):
-                print(f"[Engine] Warning: Config {config_path} not found.")
-            # 初�?�化 MuSc 模型 (加载权重�? GPU/CPU)
+                print(f"[Engine] Warning: MuSc Config {config_path} not found.")
             self.musc_wrapper = MuScWrapper(config_path)
             
-        # 执�?�批量生�?
-        saved_paths = self.musc_wrapper.generate_anomaly_maps(input_dir, maps_output_dir)
+        saved_paths = self.musc_wrapper.generate_anomaly_maps(input_dir, output_root)
         
-        # 检查是否生成了文件
         if saved_paths and len(saved_paths) > 0:
-            return maps_output_dir
+            return output_root
         return None
 
-    def run_bridge(self, input_images, input_maps, output_dir):
+    def run_bridge(self, input_images, input_maps, output_dir, category_name):
         """
-        方法：封�? DataBridge 的调用逻辑
-        
-        参数:
-            input_images: 原�?�图片目�?
-            input_maps: MuSc 生成�? .npy �?力图�?�?
-            output_dir: �?换后数据的存放目�?
+        方法：调用重构后的 DataBridge 语义路由算子
         """
-        from core.data_bridge import DataBridge # 局部�?�入
+        from core.data_bridge import DataBridge 
         
         bridge = DataBridge() 
+        print(f"[Engine] Routing and reshaping dataset from {input_images} into standard MTD layout.")
         
-        print(f"[Engine] Bridging data from {input_images} to {output_dir}")
-        # 执�?�转�?
-        result = bridge.prepare_ncd_dataset(input_images, input_maps, output_dir)
+        result = bridge.prepare_ncd_dataset(
+            raw_images_dir=input_images, 
+            maps_dir=input_maps, 
+            output_base_dir=output_dir,
+            category_name=category_name
+        )
         return result  
 
-    def run_ncd(self, dataset_path, anomaly_map_path, base_path, output_root):
+    def run_ncd(self, dataset_path, anomaly_map_path, base_path, output_root, category_name):
         """
-        方法：封�? AnomalyNCD 算法的调用逻辑
-        
-        参数:
-            dataset_path: 整理好的图片�?�? (DataBridge 输出)
-            anomaly_map_path: 整理好的�?力图�?�? (DataBridge 输出)
-            base_path: 正常样本�?�?
-            output_root: 结果根目�?
+        方法：调用解绑硬编码后的 AnomalyNCD 包装器
         """
-        from core.anomalyncd_wrapper import AnomalyNCDWrapper # 局部�?�入
+        from core.anomalyncd_wrapper import AnomalyNCDWrapper 
         
         config_path = os.path.join(NCD_PATH, 'configs', 'AnomalyNCD.yaml')
-        ncd_output_dir = os.path.join(output_root, 'ncd_results')
         
-        # 懒加载初始化
         if self.ncd_wrapper is None:
              if not os.path.exists(config_path):
-                print(f"[Engine] Warning: Config {config_path} not found.")
+                print(f"[Engine] Warning: AnomalyNCD Config {config_path} not found.")
              self.ncd_wrapper = AnomalyNCDWrapper(config_path)
         
-        # 运�?? NCD 流程
-        # 使用关键字参数调�?，提高可读�?
+        # 将解耦后的参数流、动态类别名完整送入底层训练引擎
         result = self.ncd_wrapper.run(
             dataset_path=dataset_path, 
             anomaly_map_path=anomaly_map_path,
             base_data_path=base_path,
-            output_dir=output_root # 将根�?录传入，内部会创建子�?�?
+            output_dir=output_root,
+            category_name=category_name
         )
         
         return result

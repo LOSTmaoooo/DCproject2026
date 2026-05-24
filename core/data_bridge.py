@@ -3,152 +3,120 @@
 # 模块：数据桥接器 (Data Bridge)
 # 文件名：data_bridge.py
 # 功能：
-#   负责连接 MuSc 和 AnomalyNCD 两个系统的数据格式。
-#   主要任务是将 MuSc 生成的 .npy 格式热力图，转换为 AnomalyNCD 所需的特定目录结构和 PNG 格式图片。
+#   基于语义前缀 (known_normal, known_crack, unknown_new 等) 进行智能路由。
+#   将 MuSc 的输出精确转换为 AnomalyNCD (MTD格式) 要求的目录结构和图片格式。
 # =================================================================================================
 
 import os
-import sys
 import shutil
 import numpy as np
-import cv2  # OpenCV 库，用于图像处理
+import cv2
 from tqdm import tqdm
 
-# --- 路径配置 ---
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NCD_PATH = os.path.join(PROJECT_ROOT, 'libs', 'AnomalyNCD')
-sys.path.append(NCD_PATH)
-
-# --- 常量定义 ---
-# 这些常量需要与 AnomalyNCDWrapper 中的配置保持一致
-CATEGORY_NAME = "unknown"    # 类别名
-ANOMALY_TYPE  = "unknown"    # 异常类型名 (用于未标记数据)
-
 class DataBridge:
-    """
-    类：数据桥接器
-    
-    Data Bridge 的存在是为了解耦 MuSc 和 AnomalyNCD。
-    MuSc 专注于生成热力图，而不关心下游任务所需的文件夹结构。
-    本类负责将两者适配起来。
-    """
-    
     def __init__(self):
         pass
 
-    def prepare_ncd_dataset(self, raw_images_dir, maps_dir, output_base_dir):
-        """
-        方法：准备 NCD 数据集
-        
-        功能：
-            遍历原始图片和对应的热力图，将它们复制/转换到目标目录，
-            构建从 MuSc 输出到 AnomalyNCD 输入的管道。
-            
-        输入要求：
-            raw_images_dir: 包含 jpg/png 原图的文件夹。
-            maps_dir: 包含 _map.npy 文件的文件夹 (由 MuSc 生成)。
-            
-        输出结构 (AnomalyNCD MTD/Custom 格式):
-           output_base_dir/
-             |-- images/
-             |     |-- unknown/
-             |           |-- img1.png
-             |-- anomaly_maps/
-                   |-- unknown/
-                         |-- unknown/
-                               |-- img1.png  (注意：这里必须是 PNG 灰度图，不能是 npy)
-        
-        Args:
-            raw_images_dir (str): 源图像目录。
-            maps_dir (str): 源热力图目录。
-            output_base_dir (str): 目标根目录。
-            
-        Returns:
-            dict: 包含 'images_path' 和 'anomaly_maps_path' 的字典，供后续步骤使用。
-            或 None (如果失败)。
-        """
-        print(f"[DataBridge] Starting data preparation for AnomalyNCD...")
+    def prepare_ncd_dataset(self, raw_images_dir, maps_dir, output_base_dir, category_name="custom_dataset"):
+        print(f"[DataBridge] Starting semantic routing for AnomalyNCD. Category: {category_name}")
 
-        # --- 1. 创建目标目录结构 ---
-        
-        # 构建 images 路径：output/images/unknown/
-        images_root     = os.path.join(output_base_dir, "images")
-        out_images_dir  = os.path.join(images_root, ANOMALY_TYPE)
+        # --- 1. 定义核心输出路径 (双保险兼容底层读取习惯) ---
+        base_data_root_img = os.path.join(output_base_dir, "normal_ref", category_name, "images", "good")
+        base_data_root_trn = os.path.join(output_base_dir, "normal_ref", category_name, "train", "good")
+        base_data_root_msk = os.path.join(output_base_dir, "normal_ref", category_name, "masks", "good")
+        images_root    = os.path.join(output_base_dir, "images", category_name)
+        maps_root      = os.path.join(output_base_dir, "anomaly_maps", category_name)
 
-        # 构建 anomaly_maps 路径：output/anomaly_maps/unknown/unknown/
-        maps_root       = os.path.join(output_base_dir, "anomaly_maps")
-        out_maps_dir    = os.path.join(maps_root, CATEGORY_NAME, ANOMALY_TYPE)
-
-        # 创建目录 (如果父目录不存在会自动创建)
-        for d in [out_images_dir, out_maps_dir]:
+        # --- 防御性编程：强制创建所有空壳目录 ---
+        # 无论这次上传有没有正常样本，先把架子搭好，防止下游 os.listdir 找不到文件夹崩溃
+        for d in [base_data_root_img, base_data_root_trn, base_data_root_msk, images_root, maps_root]:
             os.makedirs(d, exist_ok=True)
 
-        # --- 2. 扫描源文件 ---
         valid_exts = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
-        # 获取所有支持格式的图片文件列表，并排序
-        image_files = sorted(
-            f for f in os.listdir(raw_images_dir) if f.lower().endswith(valid_exts)
-        )
+        processed_count = {"normal": 0, "anomaly": 0}
 
-        if not image_files:
-            print(f"[DataBridge] Error: No images found in {raw_images_dir}")
-            return None
+        # --- 2. 递归遍历原图目录进行路由 ---
+        for root, dirs, files in os.walk(raw_images_dir):
+            for file in files:
+                if not file.lower().endswith(valid_exts):
+                    continue
 
-        processed_count = 0
-
-        # --- 3. 遍历处理每张图片 ---
-        for img_name in tqdm(image_files, desc="Bridging Data"):
-            # 获取文件名 (不含扩展名)，例如 "img001"
-            base_name = os.path.splitext(img_name)[0]
-            
-            # 构建源文件完整路径
-            img_path  = os.path.join(raw_images_dir, img_name)
-            # 推断应存在的热力图文件名：<原文件名>_map.npy
-            map_path  = os.path.join(maps_dir, f"{base_name}_map.npy")
-
-            # 检查热力图是否存在
-            if not os.path.exists(map_path):
-                print(f"[DataBridge] Warning: Map not found for {img_name}, skipping.")
-                continue
-
-            # --- 动作 A: 复制原图 ---
-            # 直接将原图复制到目标 images 目录
-            dest_img_path = os.path.join(out_images_dir, img_name)
-            shutil.copy2(img_path, dest_img_path)
-
-            # --- 动作 B: 转换异常热力图 (.npy -> .png) ---
-            # AnomalyNCD 的 MEBin 模块通常使用 opencv 读取灰度图，因此必须转为 PNG
-            
-            # 加载 float32 的 npy 数组
-            anomaly_map = np.load(map_path)
-            
-            # 数据归一化到 [0, 1] 区间
-            map_min, map_max = float(anomaly_map.min()), float(anomaly_map.max())
-            if map_max > map_min:
-                norm_map = (anomaly_map - map_min) / (map_max - map_min)
-            else:
-                norm_map = np.zeros_like(anomaly_map)
+                img_path = os.path.join(root, file)
+                rel_path = os.path.relpath(img_path, raw_images_dir)
                 
-            # 缩放到 [0, 255] 并转为 uint8 类型
-            map_uint8 = (norm_map * 255).astype(np.uint8)
+                rel_dir = os.path.dirname(rel_path)
+                basename = os.path.splitext(file)[0]
+                
+                folder_name = rel_dir if rel_dir else "unknown_default"
+                anomaly_type = folder_name.replace(os.sep, "_") 
 
-            # 写入 PNG 文件
-            dest_map_path = os.path.join(out_maps_dir, f"{base_name}.png")
-            cv2.imwrite(dest_map_path, map_uint8)
+                # --- 路由策略 A: 正常参考样本 ---
+                if anomaly_type.startswith("known_normal"):
+                    # 双保险：同时存一份到 images 和 train 里，彻底迎合各种开源底层的硬编码癖好
+                    shutil.copy2(img_path, os.path.join(base_data_root_img, file))
+                    shutil.copy2(img_path, os.path.join(base_data_root_trn, file))
+                    
+                    # 补齐：生成占位的全黑掩码，满足 AnomalyNCD 在 masks/good 目录下的配对读取要求
+                    orig_img = cv2.imread(img_path)
+                    if orig_img is not None:
+                        h, w = orig_img.shape[:2]
+                        blank_mask = np.zeros((h, w), dtype=np.uint8)
+                        # 为了和 img_path 的 os.listdir 排序结果严格对应，使用原生 file 名称
+                        mask_save_name = file if file.endswith('.png') else f"{basename}.png"
+                        
+                        # AnomalyNCD 对不同后缀文件会严格配对，最安全的做法是如果原图不是 png，则重命名双方统一或者保存一样后缀。
+                        # 不过实际上 `get_image_data` 只看排序，但 opencv imwrite 如果是不支持后缀会保存失败，
+                        # 所以我们统一如果 mask 是 .png，原始图片在 copy 时尽量保持原样，如果有 bug 则再进一步调整。
+                        # 最佳方案是直接根据 file 进行写操作，OpenCV写 jpg 也行，但 mask 本应是单通道 png，这里我们写同名如果不支持则变 png
+                        if not file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                             mask_save_path = os.path.join(base_data_root_msk, f"{basename}.png")
+                        else:
+                             mask_save_path = os.path.join(base_data_root_msk, file)
+                        cv2.imwrite(mask_save_path, blank_mask)
+                    
+                    processed_count["normal"] += 1
+                
+                # --- 路由策略 B: 待分析样本 (已知异常 & 未知异常) ---
+                else:
+                    dest_img_path = os.path.join(images_root, anomaly_type, file)
+                    dest_map_path = os.path.join(maps_root, anomaly_type, f"{basename}.png")
+                    
+                    os.makedirs(os.path.dirname(dest_img_path), exist_ok=True)
+                    os.makedirs(os.path.dirname(dest_map_path), exist_ok=True)
+                    
+                    # 动作 1: 拷贝原图
+                    shutil.copy2(img_path, dest_img_path)
+                    
+                    # 动作 2: 查找并转换对应的 .npy 热力图 (从 MuSc 输出目录中找)
+                    map_path = os.path.join(maps_dir, rel_dir, f"{basename}_map.npy")
+                    if os.path.exists(map_path):
+                        anomaly_map = np.load(map_path)
+                        # [0, 1] 归一化并转为 uint8 的 PNG
+                        map_min, map_max = float(anomaly_map.min()), float(anomaly_map.max())
+                        if map_max > map_min:
+                            norm_map = (anomaly_map - map_min) / (map_max - map_min)
+                        else:
+                            norm_map = np.zeros_like(anomaly_map)
+                        map_uint8 = (norm_map * 255).astype(np.uint8)
+                        cv2.imwrite(dest_map_path, map_uint8)
+                    else:
+                        # 容错处理：如果 MuSc 没生成热力图，生成一张全黑的占位符防崩溃
+                        print(f"[DataBridge] Warning: Map {map_path} not found. Creating blank map.")
+                        blank_map = np.zeros((256, 256), dtype=np.uint8)
+                        cv2.imwrite(dest_map_path, blank_map)
+                        
+                    processed_count["anomaly"] += 1
 
-            processed_count += 1
-
-        print(f"[DataBridge] Prepared {processed_count} image-map pairs.")
-        print(f"[DataBridge]   images_path      -> {images_root}")
-        print(f"[DataBridge]   anomaly_maps_path-> {maps_root}")
-
-        # 返回构建好的路径供 AnomalyNCD 使用
+        print(f"[DataBridge] Routing complete: {processed_count['normal']} normal ref, {processed_count['anomaly']} anomalies.")
+        
+        # --- 核心修正：适配 AnomalyNCD 不对称的路径读取逻辑 ---
+        # 引擎将把以下路径传给 AnomalyNCD
         return {
-            'images_path':       images_root,
-            'anomaly_maps_path': maps_root,
+            # base_data 和 images 需要向下一级，直接指向类别目录
+            'base_data_path':    os.path.join(output_base_dir, "normal_ref", category_name), 
+            'images_path':       os.path.join(output_base_dir, "images", category_name),
+            
+            # anomaly_maps 保持在外层根目录，因为 NCD 底层会自动拼接 category_name
+            'anomaly_maps_path': os.path.join(output_base_dir, "anomaly_maps"),
+            'category_name':     category_name 
         }
-
-if __name__ == "__main__":
-    # 简单的本地测试代码
-    bridge = DataBridge()
-    # ... 测试逻辑 ...

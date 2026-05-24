@@ -60,68 +60,56 @@ class InferenceDataset(Dataset):
     """
     类功能：
         为 PyTorch DataLoader 提供标准的数据接口。
-        专用于"无标签推理"场景，即只有一个图片目录，没有掩模(Mask)或标签文件。
+        支持递归读取子文件夹，并记录文件的相对路径，以便后续镜像输出目录结构。
     """
     def __init__(self, image_dir, resize=256, imagesize=224, clip_transformer=None):
-        """
-        初始化数据集。
-        Args:
-            image_dir: 图片文件夹路径。
-            resize: 图片预处理时的缩放尺寸。
-            imagesize: Crop 后的最终输入尺寸。
-            clip_transformer: 如果使用 CLIP 模型，传入其特定的预处理函数；否则使用 ImageNet 标准处理。
-        """
         self.image_dir = image_dir
-        # 定义支持的图片格式元组
         valid_exts = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
         
-        # 列表推导式：遍历目录，筛选出符合扩展名的文件，并拼接完整路径
-        self.image_paths = [
-            os.path.join(image_dir, f) for f in os.listdir(image_dir)
-            if f.lower().endswith(valid_exts)
-        ]
+        self.image_data = []
         
-        # 构建预处理流水线 (Transform Pipeline)
+        # 使用 os.walk 递归遍历所有深层文件夹
+        for root, dirs, files in os.walk(image_dir):
+            for f in files:
+                if f.lower().endswith(valid_exts):
+                    abs_path = os.path.join(root, f)
+                    # 计算相对路径，例如 "known_crack/img1.png"
+                    rel_path = os.path.relpath(abs_path, image_dir)
+                    self.image_data.append({
+                        "abs_path": abs_path,
+                        "rel_path": rel_path
+                    })
+        
+        # 排序以保证结果的可重复性
+        self.image_data.sort(key=lambda x: x["rel_path"])
+        
         if clip_transformer is None:
-            # 标准 ImageNet 预处理：Resize -> CenterCrop -> ToTensor -> Normalize
             self.transform = transforms.Compose([
-                transforms.Resize((resize, resize)),  # 调整大小
-                transforms.CenterCrop(imagesize),     # 中心裁剪
-                transforms.ToTensor(),                # 转为浮点张量 [0, 1]
-                # 标准化：减均值，除标准差
+                transforms.Resize((resize, resize)),  
+                transforms.CenterCrop(imagesize),     
+                transforms.ToTensor(),                
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ])
         else:
-            # 使用模型自带的预处理
             self.transform = clip_transformer
 
     def __len__(self):
-        """返回数据集样本总数"""
-        return len(self.image_paths)
+        return len(self.image_data)
 
     def __getitem__(self, idx):
-        """
-        按索引获取一个样本。
-        Returns:
-            dict: 包含处理后的图像张量、伪造的掩模、图像路径等。
-        """
-        img_path = self.image_paths[idx]
-        # 使用 PIL 读取图像并转为 RGB 模式 (防止读入灰度图或RGBA图导致维度错误)
-        image = Image.open(img_path).convert("RGB")
-        # 应用预处理
+        item = self.image_data[idx]
+        image = Image.open(item["abs_path"]).convert("RGB")
         image_tensor = self.transform(image)
         
-        # 创建一个全零的掩模 Tensor，形状为 [1, H, W]
-        # 仅为了兼容某些可能需要 mask 字段的底层接口，实际推理中不使用真值。
         dummy_mask = torch.zeros([1, image_tensor.shape[1], image_tensor.shape[2]])
         
         return {
             "image": image_tensor,
             "mask": dummy_mask,
-            "is_anomaly": 0,    # 默认为0 (未知/正常)
-            "image_path": img_path
+            "is_anomaly": 0,    
+            "image_path": item["abs_path"], # 绝对路径，用于读取
+            "rel_path": item["rel_path"]    # 相对路径，新增：用于后续保存时还原目录树
         }
-
 # ==========================================
 # 类：MuSc 算法封装器 (MuSc Wrapper)
 # ==========================================
@@ -252,25 +240,27 @@ class MuScWrapper:
             dataset, 
             batch_size=self.batch_size, 
             shuffle=False, 
-            num_workers=4,
-            pin_memory=True # 锁页内存，加速从 CPU 到 GPU 的传输
+            num_workers=0,
+            pin_memory=False # 锁页内存，加速从 CPU 到 GPU 的传输
         )
         
         # --- 步骤 2: 特征提取 (Feature Extraction) ---
         print("[MuScWrapper] Step 1/2: Extracting features...")
-        patch_tokens_list = [] # 存储所有批次的特征：[Batch1_Features, Batch2_Features, ...]
-        image_paths_all = []   # 存储对应的图片路径
+        patch_tokens_list = [] 
+        image_paths_all = []   
+        rel_paths_all = []     # 新增：存储相对路径
         
-        with torch.no_grad(): # 上下文管理器：禁用梯度计算，节省显存
+        with torch.no_grad(): 
             for batch in tqdm(dataloader, desc="Extracting"):
                 images = batch["image"].to(self.device)
                 paths = batch["image_path"]
+                r_paths = batch["rel_path"] # 提取相对路径
                 
-                # 调用内部方法提取特征
                 batch_features = self._extract_features(images)
                 
                 patch_tokens_list.append(batch_features) 
                 image_paths_all.extend(paths)
+                rel_paths_all.extend(r_paths) # 记录下来
                 
         # --- 步骤 3: 异常评分计算 (Computing Scores) ---
         print("[MuScWrapper] Step 2/2: Computing Scores (LNAMD + MSM)...")
@@ -335,15 +325,11 @@ class MuScWrapper:
             anomaly_maps_r = torch.cat((anomaly_maps_r, anomaly_maps_l.unsqueeze(0)), dim=0)
 
         # --- 步骤 4: 结果融合与保存 ---
-        # 对不同 r 的结果求平均，得到最终分数
         anomaly_maps_final = torch.mean(anomaly_maps_r, dim=0).to(self.device)
         
-        # 准备上采样参数
         N, L_patches = anomaly_maps_final.shape
-        H_feat = int(np.sqrt(L_patches)) # 特征图边长 (如 14)
+        H_feat = int(np.sqrt(L_patches)) 
         
-        # 双线性插值 (Bilinear Interpolation) 上采样到原始图片尺寸
-        # view() 改变形状: [N, L] -> [N, 1, H_feat, H_feat]
         anomaly_maps_resized = F.interpolate(
             anomaly_maps_final.view(N, 1, H_feat, H_feat),
             size=self.image_size, 
@@ -351,26 +337,30 @@ class MuScWrapper:
             align_corners=True
         )
         
-        # 保存文件
         saved_paths = []
-        anomaly_maps_np = anomaly_maps_resized.squeeze().cpu().numpy() # 转回 CPU numpy 数组
+        anomaly_maps_np = anomaly_maps_resized.squeeze().cpu().numpy() 
         
-        # Handle single image batch case where squeeze removes too many dims
         if len(anomaly_maps_np.shape) == 2:
             anomaly_maps_np = anomaly_maps_np[np.newaxis, ...]
             
-        print("[MuScWrapper] Saving anomaly maps...")
+        print("[MuScWrapper] Saving anomaly maps with mirrored directory structure...")
         for i in range(len(image_paths_all)):
             img_path = image_paths_all[i]
+            rel_path = rel_paths_all[i]
             basename = os.path.splitext(os.path.basename(img_path))[0]
             
-            # 获取单张图的热力图
+            # --- 核心改动：镜像创建目录 ---
+            # 获取图片所在的相对目录，例如 "known_crack"
+            rel_dirname = os.path.dirname(rel_path)
+            # 在输出根目录下构建对应的子目录
+            target_dir = os.path.join(output_dir, rel_dirname)
+            os.makedirs(target_dir, exist_ok=True)
+            
             map_data = anomaly_maps_np[i]
             
-            # 构建保存路径
-            save_path = os.path.join(output_dir, f"{basename}_map.npy")
+            # 保存到对应的子目录中
+            save_path = os.path.join(target_dir, f"{basename}_map.npy")
             
-            # 保存为 NumPy 格式 (.npy) 保留浮点精度
             np.save(save_path, map_data)
             saved_paths.append(save_path)
             

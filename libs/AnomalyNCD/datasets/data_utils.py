@@ -146,7 +146,9 @@ def get_pseudo_label_weights(image_path, anomaly_thred, base_category, anomaly_s
     mask_lab = torch.ones(len(image_path))
     # load anomaly score for each sub-image.
     for i, pth in enumerate(image_path):
-        if base_category not in pth:
+        # [Fix] Hardened check to look for unique "normal_ref" token rather than volatile full absolute path string matching.
+        # This completely guarantees Windows/Linux path separator safety and backend isolation.
+        if "normal_ref" not in pth:
             mask_lab[i] = 0
             if anomaly_thred==-1:
                 sample_weights.append(0)

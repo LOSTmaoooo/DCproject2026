@@ -53,7 +53,7 @@ class AnomalyNCD():
         self.args = get_class_splits(self.args)
 
         setup_seed(self.args.seed)
-        self.args.base_category = os.path.basename(self.args.base_data_path)
+        self.args.base_category = 'good'
         self.args.num_labeled_classes = len(self.args.train_classes)         
         self.args.num_unlabeled_classes = len(self.args.unlabeled_classes)  
         self.args.image_size = 224
@@ -450,6 +450,7 @@ class AnomalyNCD():
         loss_record = AverageMeter()
         cluster_loss_for_test = defaultdict(list)
         total_loss = 0
+        cluster_loss_head = [0] * self.args.n_head
 
         json_path = os.path.join(self.args.crop_data_path, 'scores_json', self.args.category+'.json')
         anomaly_score_json = json.load(open(json_path, 'r'))

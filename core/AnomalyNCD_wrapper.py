@@ -69,55 +69,34 @@ class AnomalyNCDWrapper:
         # 读取 YAML 配置并在内存中持有，以便后续构建参数
         self.cfg = ncd_load_yaml(config_path)
         
-    def run(self, dataset_path, anomaly_map_path, base_data_path, output_dir):
+    def run(self, dataset_path, anomaly_map_path, base_data_path, output_dir, category_name="custom_dataset"):
         """
         方法：执行 AnomalyNCD 流程 (Run Process)
-        
-        功能：
-            1. 准备输出目录结构 (experiment, binary_masks, crops)。
-            2. 构造完整的参数字典 (合并传入路径和 YAML 配置)。
-            3. 将参数转换为 ArgsStruct 对象。
-            4. 实例化 AnomalyNCD 模型并调用其入口方法。
-            
-        Args:
-            dataset_path: 包含待分析图像的目录 (必须符合 MTD 格式结构)。
-            anomaly_map_path: 包含对应的异常热力图 (PNG格式) 的目录。
-            base_data_path: 正常样本参考数据的目录。
-            output_dir: 结果输出的根目录。
-            
-        Returns:
-            bool: 成功返回 True，失败返回 False。
         """
-        print(f"[AnomalyNCDWrapper] Initializing with dataset: {dataset_path}")
+        print(f"[AnomalyNCDWrapper] Initializing with dataset: {dataset_path}, Category: {category_name}")
         
-        # --- 1. 准备输出目录 ---
-        # binary_masks: 存放二值化后的异常掩模
+        # ... [目录准备代码保持不变] ...
         binary_data_path = os.path.join(output_dir, 'binary_masks')
-        # crops: 存放根据掩模裁剪出的异常区域 (Region of Interest)
         crop_data_path = os.path.join(output_dir, 'crops')
-        # exp_root: 存放实验日志、Checkpoints 等
         exp_root = os.path.join(output_dir, 'experiment')
         
-        # 递归创建目录
         os.makedirs(binary_data_path, exist_ok=True)
         os.makedirs(crop_data_path, exist_ok=True)
         os.makedirs(exp_root, exist_ok=True)
         
         # --- 2. 构建参数字典 (Argument Dictionary) ---
-        # 这里的键名 (Key) 必须与 AnomalyNCD 内部 argparse 定义的参数名完全一致
         args_dict = {
-            # --- 路径相关参数 ---
-            'dataset_path': dataset_path,         # 输入图片根路径
-            'anomaly_map_path': anomaly_map_path, # 输入热力图根路径
-            'binary_data_path': binary_data_path, # 输出：二值掩模路径
-            'crop_data_path': crop_data_path,     # 输出：裁剪图像路径
-            'base_data_path': base_data_path,     # 参考：正常样本路径
+            'dataset_path': dataset_path,         
+            'anomaly_map_path': anomaly_map_path, 
+            'binary_data_path': binary_data_path, 
+            'crop_data_path': crop_data_path,     
+            'base_data_path': base_data_path,     
             
-            'dataset': 'custom',     # 数据集类型，指定为 'custom'
-            'category': 'unknown',   # 类别名称，通常设为 'unknown'
+            'dataset': 'custom',     
+            'category': category_name,
             
-            'config': self.config_path,  # 配置文件路径
-            'runner_name': 'AnomalyNCD_Runner', # 运行器名称标识
+            'config': self.config_path,  
+            'runner_name': 'AnomalyNCD_Runner',
             'only_test': None,           # 仅测试模式标志
             'checkpoint_path': None,     # 预训练模型路径
             

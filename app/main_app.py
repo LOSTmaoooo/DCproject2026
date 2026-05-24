@@ -91,13 +91,11 @@ if mode == "Mode 1: Model Training & Batch Analysis":
         st.header("Step 1: Data Preparation & Execution")
         
         # --- 数据输入区 ---
-        default_input_path = os.path.join(PROJECT_ROOT, "data_store", "raw_inputs")
-        input_dir = st.text_input("Local Directory Path:", value=default_input_path)
-        
-        uploaded_files = st.file_uploader(
-            "Or Upload Image Files / ZIP archive", 
-            accept_multiple_files=True, 
-            type=['png', 'jpg', 'jpeg', 'bmp', 'tiff', 'zip']
+        # 砍掉本地路径输入和多图片零散上传，强制要求结构化的 ZIP 压缩包
+        uploaded_file = st.file_uploader(
+            "上传包含结构化数据集的 ZIP 压缩包 (如 known_normal, known_crack, unknown_new...)", 
+            accept_multiple_files=False, 
+            type=['zip']
         )
         
         # --- 进程控制区 ---
@@ -106,8 +104,7 @@ if mode == "Mode 1: Model Training & Batch Analysis":
 
         with col1:
             if st.button("▶️ 准备数据并开始训练 (Start Pipeline)", use_container_width=True):
-                # 1. 处理上传的文件
-                if uploaded_files:
+                if uploaded_file:
                     upload_dir = os.path.join(PROJECT_ROOT, "data_store", "raw_inputs_uploaded")
                     os.makedirs(upload_dir, exist_ok=True)
                     
@@ -119,65 +116,62 @@ if mode == "Mode 1: Model Training & Batch Analysis":
                         elif os.path.isdir(file_path):
                             shutil.rmtree(file_path)
                         
-                    with st.spinner('正在处理上传的文件并自动解压...'):
-                        for uploaded_file in uploaded_files:
-                            if uploaded_file.name.endswith('.zip'):
-                                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
-                                    zip_ref.extractall(upload_dir)
-                            else:
-                                with open(os.path.join(upload_dir, uploaded_file.name), "wb") as f:
-                                    f.write(uploaded_file.getbuffer())
-                        
-                        # 遍历解压后的目录，把所有深层文件夹里的图片移动到最外层
+                    with st.spinner('正在处理上传的 ZIP 包并严格规范化目录树...'):
+                        # 1. 直接解压，保留原始目录树
+                        with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+                            zip_ref.extractall(upload_dir)
+                            
+                        # 2. 清理冗余的系统级隐藏文件夹 (如 Mac 压缩包自带的)
                         for root, dirs, files in os.walk(upload_dir):
-                            if root == upload_dir:
-                                continue # 如果已经在最外层了就跳过
-                            for file in files:
-                                # 识别常见图片格式
-                                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
-                                    src_path = os.path.join(root, file)
-                                    dst_path = os.path.join(upload_dir, file)
-                                    # 防止同名文件报错
-                                    if not os.path.exists(dst_path):
-                                        shutil.move(src_path, dst_path)
-                        
-                        # 清理掉多余的子文件夹 (比如 __MACOSX 或者是压缩包自带的外层文件夹)
-                        for item in os.listdir(upload_dir):
-                            item_path = os.path.join(upload_dir, item)
-                            if os.path.isdir(item_path):
-                                shutil.rmtree(item_path)
+                            if "__MACOSX" in dirs:
+                                shutil.rmtree(os.path.join(root, "__MACOSX"))
+                                dirs.remove("__MACOSX")
+
+                        # 3. 严格规范化：自底向上遍历，强制将所有目录和文件名转换为小写
+                        # 废弃原有的平铺逻辑，保证 MTD 数据集格式的语义前缀不丢失
+                        for root, dirs, files in os.walk(upload_dir, topdown=False):
+                            for name in files:
+                                lower_name = name.lower()
+                                if name != lower_name:
+                                    os.rename(os.path.join(root, name), os.path.join(root, lower_name))
+                                    
+                            for name in dirs:
+                                lower_name = name.lower()
+                                if name != lower_name:
+                                    os.rename(os.path.join(root, name), os.path.join(root, lower_name))
 
                     input_dir = upload_dir 
                 
-                # 2. 清理旧进程并启动新进程
-                if current_pid:
-                    try:
-                        os.kill(current_pid, signal.SIGTERM)
-                        time.sleep(1)
-                    except Exception: pass
-                
-                with open(LOG_FILE, "w") as f:
-                    f.write(f"Initialize training pipeline on directory: {input_dir}\n")
+                    # 4. 清理旧进程并启动新进程
+                    if current_pid:
+                        try:
+                            os.kill(current_pid, signal.SIGTERM)
+                            time.sleep(1)
+                        except Exception: pass
                     
-                # TODO: 替换为你实际的统一训练执行脚本 (例如 run_pipeline.py)
-                # 请确保你的后端代码会将模型保存到 MODEL_DIR，并将结果 CSV 保存到 RESULTS_DIR
-                training_command = ["python", "-u", "core/run_pipeline.py", "--input_dir", input_dir]  
+                    with open(LOG_FILE, "w") as f:
+                        f.write(f"Initialize training pipeline on directory: {input_dir}\n")
+                        
+                    training_command = ["python", "-u", "core/run_pipeline.py", "--input_dir", input_dir]  
 
-                with open(LOG_FILE, "a") as log_f:
-                    process = subprocess.Popen(
-                        training_command, 
-                        stdout=log_f, 
-                        stderr=subprocess.STDOUT,
-                        cwd=PROJECT_ROOT
-                    )
-                with open(PID_FILE, "w") as f:
-                    f.write(str(process.pid))
-                    
-                st.success("✅ 训练流水线已在后台启动！可以随时在下方查看进度。")
-                time.sleep(1)
-                st.rerun()
+                    with open(LOG_FILE, "a") as log_f:
+                        process = subprocess.Popen(
+                            training_command, 
+                            stdout=log_f, 
+                            stderr=subprocess.STDOUT,
+                            cwd=PROJECT_ROOT
+                        )
+                    with open(PID_FILE, "w") as f:
+                        f.write(str(process.pid))
+                        
+                    st.success("✅ 结构化数据已就绪，训练流水线已在后台启动！")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning("⚠️ 请先上传规范的 ZIP 压缩包！")
 
         with col2:
+            # 中断按钮逻辑保持不变
             if st.button("⏹️ 中断当前训练 (Stop)", type="primary", use_container_width=True):
                 if current_pid:
                     try:
@@ -191,6 +185,7 @@ if mode == "Mode 1: Model Training & Batch Analysis":
                     st.rerun()
                 else:
                     st.info("当前没有正在运行的训练任务。")
+
 
         # --- 日志可视化区 ---
         st.subheader("🖥️ 实时训练状态 (Terminal Output)")
