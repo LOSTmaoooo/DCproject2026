@@ -47,36 +47,35 @@ class DataBridge:
                 rel_dir = os.path.dirname(rel_path)
                 basename = os.path.splitext(file)[0]
                 
-                folder_name = rel_dir if rel_dir else "unknown_default"
-                anomaly_type = folder_name.replace(os.sep, "_") 
+                # 【修复 1】提取最底层文件夹名作为类别，避免外层嵌套目录干扰
+                actual_category = os.path.basename(rel_dir) if rel_dir else "unknown_default"
+                anomaly_type = actual_category.replace(os.sep, "_") 
 
-                # --- 路由策略 A: 正常参考样本 ---
-                if anomaly_type.startswith("known_normal"):
-                    # 双保险：同时存一份到 images 和 train 里，彻底迎合各种开源底层的硬编码癖好
-                    shutil.copy2(img_path, os.path.join(base_data_root_img, file))
-                    shutil.copy2(img_path, os.path.join(base_data_root_trn, file))
+                # --- 路由策略 A: 正常参考样本与已知缺陷样本 ---
+                # 【修复 2】支持所有已知前缀类别，不再遗漏 known_crack 等已知缺陷
+                if anomaly_type.startswith("known_"):
+                    # 【修复 3】动态生成对应的已知类别文件夹，避免全部重叠写入 good 中
+                    cls_img_dir = os.path.join(output_base_dir, "normal_ref", category_name, "images", anomaly_type)
+                    cls_trn_dir = os.path.join(output_base_dir, "normal_ref", category_name, "train", anomaly_type)
+                    cls_msk_dir = os.path.join(output_base_dir, "normal_ref", category_name, "masks", anomaly_type)
                     
-                    # 补齐：生成占位的全黑掩码，满足 AnomalyNCD 在 masks/good 目录下的配对读取要求
+                    for d in [cls_img_dir, cls_trn_dir, cls_msk_dir]:
+                        os.makedirs(d, exist_ok=True)
+                        
+                    shutil.copy2(img_path, os.path.join(cls_img_dir, file))
+                    shutil.copy2(img_path, os.path.join(cls_trn_dir, file))
+                    
                     orig_img = cv2.imread(img_path)
                     if orig_img is not None:
                         h, w = orig_img.shape[:2]
                         blank_mask = np.zeros((h, w), dtype=np.uint8)
-                        # 为了和 img_path 的 os.listdir 排序结果严格对应，使用原生 file 名称
-                        mask_save_name = file if file.endswith('.png') else f"{basename}.png"
-                        
-                        # AnomalyNCD 对不同后缀文件会严格配对，最安全的做法是如果原图不是 png，则重命名双方统一或者保存一样后缀。
-                        # 不过实际上 `get_image_data` 只看排序，但 opencv imwrite 如果是不支持后缀会保存失败，
-                        # 所以我们统一如果 mask 是 .png，原始图片在 copy 时尽量保持原样，如果有 bug 则再进一步调整。
-                        # 最佳方案是直接根据 file 进行写操作，OpenCV写 jpg 也行，但 mask 本应是单通道 png，这里我们写同名如果不支持则变 png
-                        if not file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                             mask_save_path = os.path.join(base_data_root_msk, f"{basename}.png")
-                        else:
-                             mask_save_path = os.path.join(base_data_root_msk, file)
+                        mask_save_name = file if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')) else f"{basename}.png"
+                        mask_save_path = os.path.join(cls_msk_dir, mask_save_name)
                         cv2.imwrite(mask_save_path, blank_mask)
                     
                     processed_count["normal"] += 1
                 
-                # --- 路由策略 B: 待分析样本 (已知异常 & 未知异常) ---
+                # --- 路由策略 B: 待分析样本 (完全未知的异常) ---
                 else:
                     dest_img_path = os.path.join(images_root, anomaly_type, file)
                     dest_map_path = os.path.join(maps_root, anomaly_type, f"{basename}.png")
@@ -84,14 +83,11 @@ class DataBridge:
                     os.makedirs(os.path.dirname(dest_img_path), exist_ok=True)
                     os.makedirs(os.path.dirname(dest_map_path), exist_ok=True)
                     
-                    # 动作 1: 拷贝原图
                     shutil.copy2(img_path, dest_img_path)
                     
-                    # 动作 2: 查找并转换对应的 .npy 热力图 (从 MuSc 输出目录中找)
                     map_path = os.path.join(maps_dir, rel_dir, f"{basename}_map.npy")
                     if os.path.exists(map_path):
                         anomaly_map = np.load(map_path)
-                        # [0, 1] 归一化并转为 uint8 的 PNG
                         map_min, map_max = float(anomaly_map.min()), float(anomaly_map.max())
                         if map_max > map_min:
                             norm_map = (anomaly_map - map_min) / (map_max - map_min)
@@ -100,8 +96,6 @@ class DataBridge:
                         map_uint8 = (norm_map * 255).astype(np.uint8)
                         cv2.imwrite(dest_map_path, map_uint8)
                     else:
-                        # 容错处理：如果 MuSc 没生成热力图，生成一张全黑的占位符防崩溃
-                        print(f"[DataBridge] Warning: Map {map_path} not found. Creating blank map.")
                         blank_map = np.zeros((256, 256), dtype=np.uint8)
                         cv2.imwrite(dest_map_path, blank_map)
                         

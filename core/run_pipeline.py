@@ -7,7 +7,6 @@ import sys
 # 规避底层 C++ (cv2, faiss, scikit-learn 等) 和 PyTorch 多线程打架引发 Segmentation Fault
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
-
 # 确保能正确导入 core 目录下的包
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
