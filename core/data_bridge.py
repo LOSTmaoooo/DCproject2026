@@ -51,31 +51,24 @@ class DataBridge:
                 actual_category = os.path.basename(rel_dir) if rel_dir else "unknown_default"
                 anomaly_type = actual_category.replace(os.sep, "_") 
 
-                # --- 路由策略 A: 正常参考样本与已知缺陷样本 ---
-                # 【修复 2】支持所有已知前缀类别，不再遗漏 known_crack 等已知缺陷
-                if anomaly_type.startswith("known_"):
-                    # 【修复 3】动态生成对应的已知类别文件夹，避免全部重叠写入 good 中
-                    cls_img_dir = os.path.join(output_base_dir, "normal_ref", category_name, "images", anomaly_type)
-                    cls_trn_dir = os.path.join(output_base_dir, "normal_ref", category_name, "train", anomaly_type)
-                    cls_msk_dir = os.path.join(output_base_dir, "normal_ref", category_name, "masks", anomaly_type)
-                    
-                    for d in [cls_img_dir, cls_trn_dir, cls_msk_dir]:
+                # 只有 known_normal 作为 AnomalyNCD 的正常参考类，其余类别都进入待聚类样本侧。
+                if anomaly_type == "known_normal":
+                    for d in [base_data_root_img, base_data_root_trn, base_data_root_msk]:
                         os.makedirs(d, exist_ok=True)
-                        
-                    shutil.copy2(img_path, os.path.join(cls_img_dir, file))
-                    shutil.copy2(img_path, os.path.join(cls_trn_dir, file))
-                    
+
+                    shutil.copy2(img_path, os.path.join(base_data_root_img, file))
+                    shutil.copy2(img_path, os.path.join(base_data_root_trn, file))
+
                     orig_img = cv2.imread(img_path)
                     if orig_img is not None:
                         h, w = orig_img.shape[:2]
                         blank_mask = np.zeros((h, w), dtype=np.uint8)
                         mask_save_name = file if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')) else f"{basename}.png"
-                        mask_save_path = os.path.join(cls_msk_dir, mask_save_name)
+                        mask_save_path = os.path.join(base_data_root_msk, mask_save_name)
                         cv2.imwrite(mask_save_path, blank_mask)
-                    
+
                     processed_count["normal"] += 1
-                
-                # --- 路由策略 B: 待分析样本 (完全未知的异常) ---
+
                 else:
                     dest_img_path = os.path.join(images_root, anomaly_type, file)
                     dest_map_path = os.path.join(maps_root, anomaly_type, f"{basename}.png")

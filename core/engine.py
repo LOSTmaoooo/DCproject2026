@@ -9,6 +9,7 @@
 # =================================================================================================
 
 import os
+import shutil
 import sys
 
 # -------------------------------------------------------------------------------------------------
@@ -58,7 +59,9 @@ class BatchPipeline:
         
         if output_dir is None:
             output_dir = os.path.join(self.output_base, f"run_{timestamp}")
-            
+
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir)
         os.makedirs(output_dir, exist_ok=True)
         print(f"[BatchPipeline] Pipeline started with input: {input_dir}")
         print(f"[BatchPipeline] Active Category Name: {category_name}")
@@ -147,7 +150,6 @@ class BatchPipeline:
         # 流程圆满结束后，可以考虑选择性清理临时的 musc_maps 目录以节省服务器空间
         try:
             if os.path.exists(musc_maps_tmp):
-                import shutil
                 shutil.rmtree(musc_maps_tmp)
                 print("[BatchPipeline] Cleaned up temporary MuSc .npy directory.")
         except Exception:
