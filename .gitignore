@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 运行时产物（数据盘 / 符号链接）
+data_store/
+models_store
+libs/AnomalyNCD/data/
+libs/MuSc/data/
+libs/AnomalyNCD/outputs/
+libs/MuSc/outputs/
+
+# 训练进程 / 日志
+training_pid.txt
+training_log.txt
+
+# Claude Code 本地配置（含机器相关路径）
+.claude/
+
+# 系统 / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
