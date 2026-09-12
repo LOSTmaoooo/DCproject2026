@@ -41,6 +41,14 @@ MUSC_PATH = os.path.join(PROJECT_ROOT, 'libs', 'MuSc')
 if MUSC_PATH not in sys.path:
     sys.path.insert(0, MUSC_PATH)
 
+# 3.5 将 backbone 目录也加入 sys.path（修复 cwd 依赖问题）
+#     musc.py 内部用相对路径 `sys.path.append('./models/backbone')`，
+#     而 open_clip 包内有 `from open_clip.utils import ...` 绝对导入，
+#     依赖 cwd 恰好是 MuSc 目录。这里用绝对路径加入，保证从任意 cwd 都能 import open_clip。
+BACKBONE_PATH = os.path.join(MUSC_PATH, 'models', 'backbone')
+if BACKBONE_PATH not in sys.path:
+    sys.path.insert(0, BACKBONE_PATH)
+
 # 4. 导入 MuSc 的核心组件
 try:
     from models.musc import MuSc
@@ -305,7 +313,8 @@ class MuScWrapper:
             
             for l_key in Z_layers.keys():
                 # 拼接所有批次的数据 -> [Total_Images, N_patches, C]
-                Z = torch.cat(Z_layers[l_key], dim=0).to(self.device)
+                # 用 float16 减少显存（完整数据 1153 张时 float32 会 OOM）
+                Z = torch.cat(Z_layers[l_key], dim=0).to(self.device, dtype=torch.float16)
                 
                 # MSM: 计算每个 patch 在全集中的相对异常度 (基于余弦相似度等)
                 # scores 形状: [Total_Images, N_patches]

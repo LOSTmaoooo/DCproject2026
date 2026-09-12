@@ -10,8 +10,8 @@ models:
   n_views: 2
   n_head: 4
 training:
-  batch_size: 32
-  num_workers: 0
+  batch_size: 16
+  num_workers: 4
   lr: 0.003
   gamma: 0.1
   momentum: 0.9

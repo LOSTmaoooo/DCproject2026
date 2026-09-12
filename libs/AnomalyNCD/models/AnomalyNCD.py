@@ -53,7 +53,7 @@ class AnomalyNCD():
         self.args = get_class_splits(self.args)
 
         setup_seed(self.args.seed)
-        self.args.base_category = 'good'
+        self.args.base_category = os.path.basename(self.args.base_data_path)
         self.args.num_labeled_classes = len(self.args.train_classes)         
         self.args.num_unlabeled_classes = len(self.args.unlabeled_classes)  
         self.args.image_size = 224
@@ -292,7 +292,7 @@ class AnomalyNCD():
                         # 修改点 1：重定向 metrics 和 CSV 预测表单的存储路径
                         # ==========================================
                         # 动态获取项目根目录
-                        PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../'))
+                        PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../'))
                         results_dir = os.path.join(PROJECT_ROOT, 'data_store', 'results')
                         os.makedirs(results_dir, exist_ok=True)
                         
@@ -584,6 +584,11 @@ class AnomalyNCD():
 
                 exp_lr_scheduler.step()
 
+                # 定期评估（每 10 个 epoch 输出 NMI/ARI/F1，便于判断收敛，测试用）
+                if (epoch + 1) % 10 == 0:
+                    self.args.logger.info(f'=== Mid-training eval at Epoch {epoch} ===')
+                    self.sub_image_predict(epoch=epoch, save_name=f'Mid_eval_Epoch{epoch}', loss_list=cluster_loss_head)
+
                 save_dict = {
                     'model': self.model.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -597,24 +602,22 @@ class AnomalyNCD():
                 # ==========================================
                 # 高级 Checkpoint 保存策略
                 # ==========================================
-                PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../'))
+                PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../'))
                 model_dir = os.path.join(PROJECT_ROOT, 'models_store', 'checkpoint')
                 os.makedirs(model_dir, exist_ok=True)
                 
-                # 前 35 个 epoch 不保存，全速运行
-                if epoch >= 35:
-                    # 策略1：如果平均损失下降（性能提升），保存为 best_model
-                    if loss_record.avg < best_loss:
-                        best_loss = loss_record.avg
-                        best_model_path = os.path.join(model_dir, 'best_trained_model.pt')
-                        torch.save(save_dict, best_model_path)
-                        self.args.logger.info(f"✨ New best model auto-saved! (Epoch {epoch}, Loss: {best_loss:.4f})")
-                    
-                    # 策略2：每 5 个 epoch 强制存一个 latest_trained_model，作为兜底
-                    elif (epoch + 1) % 5 == 0:
-                        latest_model_path = os.path.join(model_dir, 'latest_trained_model.pt')
-                        torch.save(save_dict, latest_model_path)
-                        self.args.logger.info(f"🔄 Periodic auto-save triggered (Epoch {epoch})")
+                # 分批保存 checkpoint（测试用：可随时中断保留进度）
+                # 每 5 个 epoch 保存一次 latest（从 epoch 0 开始，便于中途中断）
+                if (epoch + 1) % 5 == 0:
+                    latest_model_path = os.path.join(model_dir, 'latest_trained_model.pt')
+                    torch.save(save_dict, latest_model_path)
+                    self.args.logger.info(f"🔄 Auto-save latest (Epoch {epoch}, Loss: {loss_record.avg:.4f})")
+                # loss 下降保存 best（epoch >= 35 后，避免早期频繁 IO）
+                if epoch >= 35 and loss_record.avg < best_loss:
+                    best_loss = loss_record.avg
+                    best_model_path = os.path.join(model_dir, 'best_trained_model.pt')
+                    torch.save(save_dict, best_model_path)
+                    self.args.logger.info(f"✨ New best model (Epoch {epoch}, Loss: {best_loss:.4f})")
 
                 # 最后一轮必须执行聚类、出表单，并保存最终模型
                 if epoch + 1 == self.args.epochs:

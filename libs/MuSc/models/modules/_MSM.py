@@ -11,10 +11,16 @@ def compute_scores_fast(Z, i, device, topmin_min=0, topmin_max=0.3):
     # speed fast but space large
     # compute anomaly scores
     image_num, patch_num, c = Z.shape
-    patch2image = torch.tensor([]).to(device)
     Z_ref = torch.cat((Z[:i], Z[i+1:]), dim=0)
-    patch2image = torch.cdist(Z[i:i+1], Z_ref.reshape(-1, c)).reshape(patch_num, image_num-1, patch_num)
-    patch2image = torch.min(patch2image, -1)[0]
+    # 分批 cdist，避免一次性大距离矩阵导致 OOM（结果与原实现完全等价：分批 min 再合并 = 整体 min）
+    chunk_size = 100
+    patch2image = None
+    for start in range(0, image_num - 1, chunk_size):
+        end = min(start + chunk_size, image_num - 1)
+        chunk = Z_ref[start:end].reshape(-1, c)
+        dist = torch.cdist(Z[i:i+1], chunk).reshape(patch_num, end - start, patch_num)
+        dist_min = torch.min(dist, -1)[0]
+        patch2image = dist_min if patch2image is None else torch.cat((patch2image, dist_min), dim=1)
     # interval average
     k_max = topmin_max
     k_min = topmin_min

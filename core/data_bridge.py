@@ -35,6 +35,20 @@ class DataBridge:
         valid_exts = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
         processed_count = {"normal": 0, "anomaly": 0}
 
+        # --- 1.5 收集所有 anomaly map 的全局 min/max ---
+        # 修复：不能用逐张 min-max 归一化，否则每张图的 max 都会变成 255，
+        # 导致 MEBin 的 get_search_range 拿到 min_th=max_th=255，阈值搜索退化、二值化全黑。
+        global_map_min = np.inf
+        global_map_max = -np.inf
+        for mroot, mdirs, mfiles in os.walk(maps_dir):
+            for mf in mfiles:
+                if mf.endswith("_map.npy"):
+                    am = np.load(os.path.join(mroot, mf))
+                    global_map_min = min(global_map_min, float(am.min()))
+                    global_map_max = max(global_map_max, float(am.max()))
+        if global_map_max <= global_map_min:
+            global_map_min, global_map_max = 0.0, 1.0  # 退化保护，避免除零
+
         # --- 2. 递归遍历原图目录进行路由 ---
         for root, dirs, files in os.walk(raw_images_dir):
             for file in files:
@@ -81,12 +95,9 @@ class DataBridge:
                     map_path = os.path.join(maps_dir, rel_dir, f"{basename}_map.npy")
                     if os.path.exists(map_path):
                         anomaly_map = np.load(map_path)
-                        map_min, map_max = float(anomaly_map.min()), float(anomaly_map.max())
-                        if map_max > map_min:
-                            norm_map = (anomaly_map - map_min) / (map_max - map_min)
-                        else:
-                            norm_map = np.zeros_like(anomaly_map)
-                        map_uint8 = (norm_map * 255).astype(np.uint8)
+                        # 全局归一化：保留图间分数差异（逐张 min-max 会让每张 max=255，MEBin 退化）
+                        norm_map = (anomaly_map - global_map_min) / (global_map_max - global_map_min)
+                        map_uint8 = np.clip(norm_map * 255, 0, 255).astype(np.uint8)
                         cv2.imwrite(dest_map_path, map_uint8)
                     else:
                         blank_map = np.zeros((256, 256), dtype=np.uint8)
@@ -97,13 +108,17 @@ class DataBridge:
         print(f"[DataBridge] Routing complete: {processed_count['normal']} normal ref, {processed_count['anomaly']} anomalies.")
         
         # --- 核心修正：适配 AnomalyNCD 不对称的路径读取逻辑 ---
-        # 引擎将把以下路径传给 AnomalyNCD
+        # base 使用 AeBAD（4 类异常，作为 labeled 先验），符合 AnomalyNCD 原始设计。
+        # 之前用 known_normal（正常类）做 base，偏离设计导致 cls 不收敛。
+        aebad_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'libs', 'AnomalyNCD', 'data', 'AeBAD_crop'
+        )
         return {
-            # base_data 和 images 需要向下一级，直接指向类别目录
-            'base_data_path':    os.path.join(output_base_dir, "normal_ref", category_name), 
+            'base_data_path':    aebad_path,
             'images_path':       os.path.join(output_base_dir, "images", category_name),
-            
+
             # anomaly_maps 保持在外层根目录，因为 NCD 底层会自动拼接 category_name
             'anomaly_maps_path': os.path.join(output_base_dir, "anomaly_maps"),
-            'category_name':     category_name 
+            'category_name':     category_name
         }
