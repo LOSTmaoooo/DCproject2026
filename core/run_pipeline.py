@@ -11,7 +11,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
-from core.engine import BatchPipeline
+from core.engine import BatchPipeline, DATA_ROOT
 
 def main():
     parser = argparse.ArgumentParser(description="运行后台分析与训练流水线")
@@ -23,7 +23,7 @@ def main():
     # 执行核心流水线
     pipeline = BatchPipeline()
     # 强制将输出目录定为前端监听的 results 目录
-    output_dir = os.path.join(PROJECT_ROOT, 'data_store', 'results')
+    output_dir = os.path.join(DATA_ROOT, 'results')
     
     success = pipeline.run(args.input_dir, output_dir=output_dir)
 

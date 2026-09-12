@@ -23,11 +23,15 @@ import shutil
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 数据盘根目录：所有运行时数据（上传图像、结果、模型）都放这里，避免占用系统盘。
+# 可通过环境变量 DC_DATA_ROOT 覆盖（换机器/换盘时只需改这个变量）。
+DATA_ROOT = os.environ.get("DC_DATA_ROOT", "/root/autodl-tmp/DCproject")
+
 # 状态记录与数据目录
 PID_FILE = os.path.join(PROJECT_ROOT, "training_pid.txt")
 LOG_FILE = os.path.join(PROJECT_ROOT, "training_log.txt")
-MODEL_DIR = os.path.join(PROJECT_ROOT, "models_store", "checkpoint")
-RESULTS_DIR = os.path.join(PROJECT_ROOT, "data_store", "results")
+MODEL_DIR = os.path.join(DATA_ROOT, "models", "checkpoint")
+RESULTS_DIR = os.path.join(DATA_ROOT, "results")
 
 # 确保必要的目录存在
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -105,7 +109,7 @@ if mode == "Mode 1: Model Training & Batch Analysis":
         with col1:
             if st.button("▶️ 准备数据并开始训练 (Start Pipeline)", use_container_width=True):
                 if uploaded_file:
-                    upload_dir = os.path.join(PROJECT_ROOT, "data_store", "raw_inputs_uploaded")
+                    upload_dir = os.path.join(DATA_ROOT, "uploads")
                     os.makedirs(upload_dir, exist_ok=True)
                     
                     # 彻底清理旧文件和旧文件夹

@@ -17,6 +17,10 @@ import sys
 # -------------------------------------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 数据盘根目录：所有运行时数据（上传图像、结果、模型）都放这里，避免占用系统盘。
+# 可通过环境变量 DC_DATA_ROOT 覆盖（换机器/换盘时只需改这个变量）。
+DATA_ROOT = os.environ.get("DC_DATA_ROOT", "/root/autodl-tmp/DCproject")
+
 LIBS_PATH = os.path.join(PROJECT_ROOT, 'libs')        
 MUSC_PATH = os.path.join(LIBS_PATH, 'MuSc')           
 NCD_PATH = os.path.join(LIBS_PATH, 'AnomalyNCD')      
@@ -39,7 +43,7 @@ class BatchPipeline:
         self.ncd_wrapper = None  # AnomalyNCD 算法封装器实例
         
         # 设置默认的结果输出根目录
-        self.output_base = os.path.join(PROJECT_ROOT, 'data_store', 'results')
+        self.output_base = os.path.join(DATA_ROOT, 'results')
         os.makedirs(self.output_base, exist_ok=True)
         
     def run(self, input_dir, output_dir=None, category_name="custom_dataset"):
@@ -198,7 +202,7 @@ class BatchPipeline:
         """
         方法：调用解绑硬编码后的 AnomalyNCD 包装器
         """
-        from core.anomalyncd_wrapper import AnomalyNCDWrapper 
+        from core.AnomalyNCD_wrapper import AnomalyNCDWrapper
         
         config_path = os.path.join(NCD_PATH, 'configs', 'AnomalyNCD.yaml')
         
